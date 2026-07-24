@@ -594,7 +594,11 @@ pub fn label_propagation_init_recursive(
                     .collect()
             }
         };
-        let n_feat = if data_full.is_some() { n_features } else { n_components };
+        let n_feat = if data_full.is_some() {
+            n_features
+        } else {
+            n_components
+        };
         let mut result = crate::pca::randomized_pca(&source, n_points, n_feat, n_components, state);
         // result -= result.mean(); result /= (result.max() - result.min()) / 2.0
         let mean: f64 = result.iter().map(|&x| x as f64).sum::<f64>() / result.len() as f64;
@@ -774,7 +778,9 @@ pub fn label_propagation_init_recursive(
                 data_expander[i * n_parts + b] += m_ij * inv_sqrt_count[b];
             }
         }
-        let row_sum: f64 = data_expander[i * n_parts..i * n_parts + n_parts].iter().sum();
+        let row_sum: f64 = data_expander[i * n_parts..i * n_parts + n_parts]
+            .iter()
+            .sum();
         if row_sum != 0.0 {
             for v in data_expander[i * n_parts..i * n_parts + n_parts].iter_mut() {
                 *v /= row_sum;

@@ -268,7 +268,12 @@ pub fn randomized_svd(
     let mut vt_out = vec![0.0f64; k * n];
     vt_out[..(k * n)].copy_from_slice(&vt[..(k * n)]);
 
-    RandomizedSvd { u: u_out, s: s_out, vt: vt_out, n_components: k }
+    RandomizedSvd {
+        u: u_out,
+        s: s_out,
+        vt: vt_out,
+        n_components: k,
+    }
 }
 
 /// PCA via randomized SVD: mean-centers `data` (flat row-major `m x n`) and
@@ -413,8 +418,11 @@ mod tests {
         let n = 5000;
         let samples: Vec<f32> = (0..n).map(|_| next_standard_normal(&mut state)).collect();
         let mean: f64 = samples.iter().map(|&x| x as f64).sum::<f64>() / n as f64;
-        let var: f64 =
-            samples.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n as f64;
+        let var: f64 = samples
+            .iter()
+            .map(|&x| (x as f64 - mean).powi(2))
+            .sum::<f64>()
+            / n as f64;
         assert!(mean.abs() < 0.1, "mean {mean}");
         assert!((var - 1.0).abs() < 0.15, "var {var}");
     }

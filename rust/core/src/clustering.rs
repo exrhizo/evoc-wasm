@@ -337,7 +337,7 @@ pub fn evoc_clusters(
 
     let n_components = opts
         .node_embedding_dim
-        .unwrap_or_else(|| (opts.n_neighbors / 4).max(4).min(15));
+        .unwrap_or_else(|| (opts.n_neighbors / 4).clamp(4, 15));
 
     let graph_indptr: Vec<i64> = csr.indptr.iter().map(|&x| x as i64).collect();
     let graph_indices: Vec<i64> = csr.indices.iter().map(|&x| x as i64).collect();
