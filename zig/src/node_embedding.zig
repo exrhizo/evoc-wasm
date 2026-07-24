@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const rng = @import("rng.zig");
 
 /// Port of make_epochs_per_sample.
 ///
@@ -344,6 +345,103 @@ pub fn node_embedding(
         }
         alpha = @floatCast(@as(f64, params.initial_alpha) * (1.0 - @as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(n_epochs))));
     }
+}
+
+/// Fisher-Yates shuffle driven by `tau_rand_int`, used by the self-driven
+/// node-embedding path (see `node_embedding_repr_self_driven`).
+fn fisher_yates_shuffle(v: []u32, state: *rng.State) void {
+    var i: usize = v.len;
+    while (i > 1) {
+        i -= 1;
+        const j: usize = @intCast(@mod(rng.tau_rand_int(state), @as(i32, @intCast(i + 1))));
+        const tmp = v[i];
+        v[i] = v[j];
+        v[j] = tmp;
+    }
+}
+
+/// Self-driven variant of `node_embedding` (the reproducible/`_repr` path)
+/// for the `evoc_clusters` pipeline (phase 9): rather than consuming a
+/// pre-recorded `rng_val` / `node_order_shuffles` (numpy-MT draws, not
+/// portable -- see PORT_NOTES.md), this draws everything from this project's
+/// own `tau_rand` RNG, advancing `state` in place. `initial_embedding = null`
+/// draws `random_state.normal(scale=0.25, ...)` in the Python reference;
+/// ported here as `tau_rand`-based standard-normal draws scaled by 0.25.
+///
+/// PORT NOTE (scope): this is not bit-exact with the Python reference (which
+/// only a numpy-MT replay could achieve) -- it is validated via the
+/// ARI-based end-to-end check described in PCA_VALIDATION.md, not the
+/// fixture-parity mechanism used elsewhere in this port.
+pub fn node_embedding_repr_self_driven(
+    allocator: Allocator,
+    graph_indptr: []const u32,
+    graph_indices: []const u32,
+    graph_data: []const f32,
+    n_vertices: usize,
+    n_components: usize,
+    n_epochs: usize,
+    initial_embedding: ?[]const f32,
+    initial_alpha: f32,
+    negative_sample_rate: f32,
+    noise_level: f32,
+    state: *rng.State,
+) ![]f32 {
+    const pca = @import("pca.zig");
+
+    const embedding = try allocator.alloc(f32, n_vertices * n_components);
+    errdefer allocator.free(embedding);
+    if (initial_embedding) |e| {
+        @memcpy(embedding, e);
+    } else {
+        for (embedding) |*v| v.* = pca.next_standard_normal(state) * 0.25;
+    }
+
+    const rng_val = try allocator.alloc(u32, n_epochs);
+    defer allocator.free(rng_val);
+    for (rng_val) |*v| {
+        const draw = rng.tau_rand_int(state);
+        v.* = @intCast(@mod(draw, std.math.maxInt(i32)));
+    }
+
+    const node_order = try allocator.alloc(u32, n_vertices);
+    defer allocator.free(node_order);
+    for (0..n_vertices) |i| node_order[i] = @intCast(i);
+
+    const shuffles = try allocator.alloc([]u32, n_epochs);
+    defer {
+        for (shuffles) |s| allocator.free(s);
+        allocator.free(shuffles);
+    }
+    for (0..n_epochs) |n| {
+        fisher_yates_shuffle(node_order, state);
+        shuffles[n] = try allocator.dupe(u32, node_order);
+    }
+    const shuffles_const = try allocator.alloc([]const u32, n_epochs);
+    defer allocator.free(shuffles_const);
+    for (shuffles, 0..) |s, i| shuffles_const[i] = s;
+
+    try node_embedding(
+        allocator,
+        embedding,
+        n_vertices,
+        graph_indptr,
+        graph_indices,
+        graph_data,
+        null,
+        null,
+        .{
+            .n_components = n_components,
+            .n_epochs = n_epochs,
+            .initial_alpha = initial_alpha,
+            .negative_sample_rate = negative_sample_rate,
+            .noise_level = noise_level,
+            .reproducible_flag = true,
+            .rng_val = rng_val,
+            .node_order_shuffles = shuffles_const,
+        },
+    );
+
+    return embedding;
 }
 
 // ---------------------------------------------------------------------------

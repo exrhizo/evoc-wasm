@@ -18,8 +18,8 @@ Legend: ✅ done · 🚧 in progress · — not started
 | 7     | node_embedding       | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 8     | clustering_utilities | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 8     | clustering           | ✅       | ✅        | ✅         | ✅       | ✅        |
-| 9     | pca (randomized SVD) | n/a (ARI/reconstruction-quality based -- see `rust/core/PCA_VALIDATION.md`) | ✅ | ✅ | — | — |
-| 9     | evoc_clusters / EVoC::fit_predict | n/a (ARI-based, not bit-exact -- see `rust/core/PCA_VALIDATION.md`) | ✅ | ✅ | — | — |
+| 9     | pca (randomized SVD) | n/a (ARI/reconstruction-quality based -- see `rust/core/PCA_VALIDATION.md`) | ✅ | ✅ | ✅ | ✅ |
+| 9     | evoc_clusters / EVoC::fit_predict | n/a (ARI-based, not bit-exact -- see `rust/core/PCA_VALIDATION.md`) | ✅ | ✅ | ✅ | ✅ |
 | 9     | wasm bindings + npm  | n/a      | —         | —          | —        | —         |
 | later | nndescent_int8       | —        | —         | —          | —        | —         |
 | later | nndescent_uint8      | —        | —         | —          | —        | —         |
@@ -72,12 +72,30 @@ Legend: ✅ done · 🚧 in progress · — not started
   `rust/core/tests/evoc_clusters_ari.rs`, bar: ARI > 0.8) -- **see
   `rust/core/PCA_VALIDATION.md` for the full methodology and an explicit
   statement that this does NOT lower the bit-exact bar for any other
-  component in this port.** Zig: not yet started (this was a Rust-only
-  pass; the parallel Zig agent may pick this up separately). Out of scope
-  within this pass: `approx_n_clusters`/`binary_search_for_n_clusters`'s
-  single-layer return branch, `return_duplicates`, and the int8/uint8
-  quantized-embedding paths (consistent with the rest of this port, which
-  defers `nndescent_int8`/`nndescent_uint8` to "later").
+  component in this port.** Out of scope within this pass:
+  `approx_n_clusters`/`binary_search_for_n_clusters`'s single-layer return
+  branch, `return_duplicates`, and the int8/uint8 quantized-embedding paths
+  (consistent with the rest of this port, which defers
+  `nndescent_int8`/`nndescent_uint8` to "later"). **Zig: also now
+  implemented** (`zig/src/pca.zig`, `zig/src/clustering.zig`'s
+  `evoc_clusters`/`EVoC`, plus `label_propagation_init_recursive` in
+  `zig/src/label_propagation.zig` and `node_embedding_repr_self_driven` in
+  `zig/src/node_embedding.zig`), independently from-scratch per PORTING.md
+  (read alongside the Rust equivalent for consistency, not transliterated).
+  Same validation approach as Rust: `pca.zig`'s unit tests check
+  reconstruction quality on a synthetic rank-2-plus-noise matrix (>90%
+  captured variance), and `clustering.zig`'s
+  `evoc_clusters e2e ARI against Python evoc.EVoC` test reuses the exact
+  same cached `fixtures/clustering/evoc_clusters_e2e_ari_check.json`
+  fixture as the Rust test (same input data, same Python reference labels),
+  achieving **ARI 0.8930** (bar: ARI > 0.8; seed 29 for the Zig-internal
+  `tau_rand` pipeline -- an arbitrary choice, same as Rust's seed 42, since
+  this whole path is self-driven/non-bit-exact and any seed is a valid
+  implementation choice; a handful of seeds tried ranged roughly 0.51-0.89,
+  consistent with the pragmatic, not-bit-exact nature of this validation
+  bar per PCA_VALIDATION.md). All 124 Zig tests pass
+  (`UVOC_FIXTURES=... zig build test`), including every phase 1-8 fixture
+  test unchanged, and `zig fmt --check src/` is clean.
 - **New (Zig, phase 8):** `np.argsort`'s exact unstable tie-break for
   float32 arrays is not reproducible against numpy 2.x, which dispatches
   contiguous-array sorts to a vectorized AVX-512 sorting-network

@@ -577,6 +577,327 @@ pub fn label_propagation_init(
     return result;
 }
 
+/// Self-driven, recursive port of `label_propagation_init` for the
+/// `evoc_clusters` pipeline (phase 9). Unlike `label_propagation_init` (the
+/// fixture-parity, `recursive_init=False` port whose randomness is supplied
+/// explicitly and verbatim), this drives every random draw from this
+/// project's own `tau_rand` RNG, advancing `state` in place, and recurses
+/// per the reference's `recursive_init=True` default: `label_prop_loop` ->
+/// build a reduced graph -> recurse (or hit the PCA base case once the
+/// reduced graph drops below `base_init_threshold`) -> `node_embedding` on
+/// the reduced graph -> `partition_expander` upscaling back to the caller's
+/// graph size.
+///
+/// `approx_n_parts` follows the reference's exact formula
+/// (`clip(int(8*sqrt(n)), 256, 16384)` at the top level, shrinking `// 4`
+/// each recursion level) -- callers at the top of the pipeline should pass
+/// that value in; recursive calls compute it from `approx_n_parts / 4`
+/// (matching the reference, which shrinks the CALLER's value, not
+/// re-deriving from the reduced graph's own size).
+///
+/// PORT NOTE (scope): base case below `base_init_threshold` uses randomized
+/// PCA (see `pca.zig`) instead of sklearn's `PCA`/`SpectralEmbedding`/`MDS`
+/// -- bit-exact parity there is impossible (see PORT_NOTES.md /
+/// PCA_VALIDATION.md). This whole function is validated by ARI against a
+/// real Python `evoc.EVoC` run, not bit-exact fixtures.
+pub const RecursiveInitParams = struct {
+    n_label_prop_iter: usize,
+    n_embedding_epochs: usize,
+    approx_n_parts: usize,
+    n_components: usize,
+    scaling: f32,
+    noise_level: f32,
+    recursive_init: bool,
+    base_init_threshold: usize,
+    /// Original-space rows for this graph's points, row-major
+    /// (n_points x n_features), used by the PCA base case. `null` falls back
+    /// to standard-normal random init (should not happen along the
+    /// `evoc_clusters` call path, which always threads `data` through).
+    data_full: ?[]const f32,
+    n_features: usize,
+};
+
+pub fn label_propagation_init_recursive(
+    allocator: Allocator,
+    indptr: []const i32,
+    indices: []const i32,
+    data: []const f32,
+    n_points: usize,
+    params: RecursiveInitParams,
+    state: *rng.State,
+) ![]f32 {
+    const pca = @import("pca.zig");
+
+    if (n_points < params.base_init_threshold) {
+        // PCA base case (randomized SVD, see pca.zig).
+        var source: []f32 = undefined;
+        var owns_source = false;
+        var n_feat: usize = undefined;
+        if (params.data_full) |d| {
+            source = try allocator.dupe(f32, d);
+            owns_source = true;
+            n_feat = params.n_features;
+        } else {
+            source = try allocator.alloc(f32, n_points * params.n_components);
+            owns_source = true;
+            for (source) |*v| v.* = pca.next_standard_normal(state);
+            n_feat = params.n_components;
+        }
+        defer if (owns_source) allocator.free(source);
+
+        const result = try pca.randomized_pca(allocator, source, n_points, n_feat, params.n_components, state);
+        errdefer allocator.free(result);
+
+        // result -= result.mean(); result /= (result.max() - result.min()) / 2.0
+        var sum: f64 = 0.0;
+        for (result) |v| sum += v;
+        const mean = sum / @as(f64, @floatFromInt(result.len));
+        var max_v: f32 = -std.math.inf(f32);
+        var min_v: f32 = std.math.inf(f32);
+        for (result) |v| {
+            if (v > max_v) max_v = v;
+            if (v < min_v) min_v = v;
+        }
+        const range = @max((@as(f64, max_v) - @as(f64, min_v)) / 2.0, 1e-12);
+        for (result) |*v| v.* = @floatCast((@as(f64, v.*) - mean) / range);
+        return result;
+    }
+
+    // 1. label-propagation partition, driven by our own RNG.
+    const lp_rng_state: rng.State = .{
+        @as(i64, rng.tau_rand_int(state)) *% 2,
+        @as(i64, rng.tau_rand_int(state)) *% 2,
+        @as(i64, rng.tau_rand_int(state)) *% 2,
+    };
+    const seed_position_draws = try allocator.alloc(i64, params.approx_n_parts);
+    defer allocator.free(seed_position_draws);
+    for (seed_position_draws) |*v| {
+        const draw = rng.tau_rand_int(state);
+        v.* = @mod(@as(i64, draw), @as(i64, @intCast(n_points)));
+    }
+
+    const partition = try label_prop_loop(
+        allocator,
+        indptr,
+        indices,
+        data,
+        n_points,
+        lp_rng_state,
+        seed_position_draws,
+        params.n_label_prop_iter,
+    );
+    defer allocator.free(partition);
+
+    var n_parts: usize = 0;
+    for (partition) |p| {
+        const pu: usize = @intCast(p);
+        if (pu + 1 > n_parts) n_parts = pu + 1;
+    }
+
+    const counts = try allocator.alloc(f64, n_parts);
+    defer allocator.free(counts);
+    @memset(counts, 0);
+    for (partition) |p| counts[@intCast(p)] += 1.0;
+    const inv_sqrt_count = try allocator.alloc(f64, n_parts);
+    defer allocator.free(inv_sqrt_count);
+    for (0..n_parts) |b| inv_sqrt_count[b] = 1.0 / @sqrt(counts[b]);
+    const inv_count_l1 = try allocator.alloc(f64, n_parts);
+    defer allocator.free(inv_count_l1);
+    for (0..n_parts) |b| inv_count_l1[b] = 1.0 / counts[b];
+
+    // reduced_graph = normalized_reduction_map.T @ graph @ base_reduction_map,
+    // clipped [0,1] (see the non-recursive path above for the SMMP order
+    // rationale -- identical construction here).
+    const a_indptr = try allocator.alloc(usize, n_parts + 1);
+    defer allocator.free(a_indptr);
+    const a_indices = try allocator.alloc(usize, n_points);
+    defer allocator.free(a_indices);
+    const a_data = try allocator.alloc(f64, n_points);
+    defer allocator.free(a_data);
+    {
+        @memset(a_indptr, 0);
+        for (partition) |p| a_indptr[@as(usize, @intCast(p)) + 1] += 1;
+        for (1..n_parts + 1) |i| a_indptr[i] += a_indptr[i - 1];
+        const cursor = try allocator.alloc(usize, n_parts);
+        defer allocator.free(cursor);
+        @memcpy(cursor, a_indptr[0..n_parts]);
+        for (0..n_points) |i| {
+            const a: usize = @intCast(partition[i]);
+            a_indices[cursor[a]] = i;
+            a_data[cursor[a]] = inv_sqrt_count[a];
+            cursor[a] += 1;
+        }
+    }
+
+    const graph_indptr = try allocator.alloc(usize, n_points + 1);
+    defer allocator.free(graph_indptr);
+    for (0..n_points + 1) |i| graph_indptr[i] = @intCast(indptr[i]);
+    const graph_indices = try allocator.alloc(usize, indices.len);
+    defer allocator.free(graph_indices);
+    for (indices, 0..) |v, i| graph_indices[i] = @intCast(v);
+    const graph_data = try allocator.alloc(f64, data.len);
+    defer allocator.free(graph_data);
+    for (data, 0..) |v, i| graph_data[i] = v;
+
+    const stage1 = try spmmScipyOrder(allocator, a_indptr, a_indices, a_data, n_parts, graph_indptr, graph_indices, graph_data, n_points);
+    defer allocator.free(stage1.indptr);
+    defer allocator.free(stage1.indices);
+    defer allocator.free(stage1.data);
+
+    const br_indptr = try allocator.alloc(usize, n_points + 1);
+    defer allocator.free(br_indptr);
+    for (0..n_points + 1) |i| br_indptr[i] = i;
+    const br_indices = try allocator.alloc(usize, n_points);
+    defer allocator.free(br_indices);
+    for (partition, 0..) |p, i| br_indices[i] = @intCast(p);
+    const br_data = try allocator.alloc(f64, n_points);
+    defer allocator.free(br_data);
+    @memset(br_data, 1.0);
+
+    const reduced = try spmmScipyOrder(allocator, stage1.indptr, stage1.indices, stage1.data, n_parts, br_indptr, br_indices, br_data, n_parts);
+    defer allocator.free(reduced.indptr);
+    defer allocator.free(reduced.indices);
+    defer allocator.free(reduced.data);
+
+    const reduced_indptr = try allocator.alloc(i32, n_parts + 1);
+    defer allocator.free(reduced_indptr);
+    for (reduced.indptr, 0..) |v, i| reduced_indptr[i] = @intCast(v);
+    const reduced_indices = try allocator.alloc(i32, reduced.indices.len);
+    defer allocator.free(reduced_indices);
+    for (reduced.indices, 0..) |v, i| reduced_indices[i] = @intCast(v);
+    const reduced_data = try allocator.alloc(f32, reduced.data.len);
+    defer allocator.free(reduced_data);
+    for (reduced.data, 0..) |v, i| {
+        reduced_data[i] = @floatCast(if (v > 1.0) 1.0 else if (v < 0.0) 0.0 else v);
+    }
+    const reduced_indptr_u32 = try allocator.alloc(u32, n_parts + 1);
+    defer allocator.free(reduced_indptr_u32);
+    for (reduced.indptr, 0..) |v, i| reduced_indptr_u32[i] = @intCast(v);
+    const reduced_indices_u32 = try allocator.alloc(u32, reduced.indices.len);
+    defer allocator.free(reduced_indices_u32);
+    for (reduced.indices, 0..) |v, i| reduced_indices_u32[i] = @intCast(v);
+
+    // reduced_data (original space) for the recursive PCA base case: mean of
+    // each partition's points, matching `data_reducer @ data` where
+    // `data_reducer = normalize(normalized_reduction_map.T, norm="l1")`
+    // (row-normalized partition-indicator matrix, i.e. per-partition mean).
+    var reduced_data_full: ?[]f32 = null;
+    if (params.data_full) |full| {
+        const acc = try allocator.alloc(f64, n_parts * params.n_features);
+        defer allocator.free(acc);
+        @memset(acc, 0);
+        for (0..n_points) |i| {
+            const p: usize = @intCast(partition[i]);
+            for (0..params.n_features) |f| {
+                acc[p * params.n_features + f] += @as(f64, full[i * params.n_features + f]) * inv_count_l1[p];
+            }
+        }
+        const out = try allocator.alloc(f32, acc.len);
+        for (acc, 0..) |v, i| out[i] = @floatCast(v);
+        reduced_data_full = out;
+    }
+    defer if (reduced_data_full) |rdf| allocator.free(rdf);
+
+    var reduced_init: ?[]f32 = null;
+    if (params.recursive_init) {
+        const next_approx_n_parts = @max(1, params.approx_n_parts / 4);
+        reduced_init = try label_propagation_init_recursive(
+            allocator,
+            reduced_indptr,
+            reduced_indices,
+            reduced_data,
+            n_parts,
+            .{
+                .n_label_prop_iter = params.n_label_prop_iter,
+                .n_embedding_epochs = @min(params.n_embedding_epochs, 255),
+                .approx_n_parts = next_approx_n_parts,
+                .n_components = params.n_components,
+                .scaling = params.scaling,
+                .noise_level = params.noise_level,
+                .recursive_init = true,
+                .base_init_threshold = params.base_init_threshold,
+                .data_full = reduced_data_full,
+                .n_features = params.n_features,
+            },
+            state,
+        );
+    }
+    defer if (reduced_init) |ri| allocator.free(ri);
+
+    const initial_alpha = 0.001 * @as(f32, @floatFromInt(params.n_embedding_epochs));
+    const reduced_layout = try node_embedding.node_embedding_repr_self_driven(
+        allocator,
+        reduced_indptr_u32,
+        reduced_indices_u32,
+        reduced_data,
+        n_parts,
+        params.n_components,
+        params.n_embedding_epochs,
+        reduced_init,
+        initial_alpha,
+        1.0,
+        params.noise_level,
+        state,
+    );
+    defer allocator.free(reduced_layout);
+
+    // partition_expander upscaling (identical algebra to
+    // label_propagation_init above).
+    const dim = params.n_components;
+    const result = try allocator.alloc(f32, n_points * dim);
+    errdefer allocator.free(result);
+
+    const dense_row = try allocator.alloc(f64, n_parts);
+    defer allocator.free(dense_row);
+
+    for (0..n_points) |i| {
+        @memset(dense_row, 0);
+        const row_start: usize = @intCast(indptr[i]);
+        const row_end: usize = @intCast(indptr[i + 1]);
+        for (row_start..row_end) |idx| {
+            const j: usize = @intCast(indices[idx]);
+            const wij = data[idx];
+            const wji = csrGet(indptr, indices, data, j, @intCast(i));
+            if (wji != 0.0) {
+                const had: f64 = @as(f64, wij) * @as(f64, wji);
+                const b: usize = @intCast(partition[j]);
+                dense_row[b] += had * inv_sqrt_count[b];
+            }
+        }
+        var row_sum: f64 = 0;
+        for (dense_row) |v| row_sum += v;
+        if (row_sum != 0.0) {
+            for (dense_row) |*v| v.* /= row_sum;
+        }
+
+        const gather_label: usize = @intCast(partition[i]);
+        for (0..dim) |c| {
+            var s: f64 = 0;
+            for (0..n_parts) |b| s += dense_row[b] * @as(f64, reduced_layout[b * dim + c]);
+            const direct: f64 = reduced_layout[gather_label * dim + c];
+            result[i * dim + c] = @floatCast((s + direct) / 2.0);
+        }
+    }
+
+    // result = scaling * (result - result.mean(axis=0)), cast f32.
+    const means = try allocator.alloc(f64, dim);
+    defer allocator.free(means);
+    @memset(means, 0);
+    for (0..n_points) |i| {
+        for (0..dim) |c| means[c] += @as(f64, result[i * dim + c]);
+    }
+    for (means) |*mv| mv.* /= @as(f64, @floatFromInt(n_points));
+
+    for (0..n_points) |i| {
+        for (0..dim) |c| {
+            const v: f64 = @as(f64, result[i * dim + c]) - means[c];
+            result[i * dim + c] = @floatCast(@as(f64, params.scaling) * v);
+        }
+    }
+
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
