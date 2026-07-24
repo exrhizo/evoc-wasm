@@ -53,7 +53,22 @@ Key constructor params (from the Python original): `n_neighbors=15`,
   comparison (performance, binary size, WASM toolchain ergonomics) — not to
   pick a winner up front.
 
+## Repository layout
+
+- `PORTING.md` — the porting contract both implementations follow (module
+  map, numeric parity policy, fixture schema). Read this first.
+- `STATUS.md` — component-by-component progress matrix.
+- `fixtures/` — golden test vectors generated from the reference Python
+  implementation by `scripts/gen_fixtures.py`; ground truth for parity tests.
+- `rust/` — Cargo workspace (`core` = dependency-free algorithm crate;
+  `wasm` wrapper added in phase 9). `cd rust && cargo test`.
+- `zig/` — Zig 0.13 package, tests colocated. `cd zig && zig build test`.
+- `comparison/results.md` — binary size / speed / parity comparison.
+
+The reference implementation is cloned (read-only) at
+`/scratch/evoc-reference` in the sandbox; it is not part of this repo.
+
 ## Status
 
-Scaffold only. No implementation yet — this is the workspace for a
-sandboxed claw agent (`lungta-claw uvoc-wasm exec`) to do the actual port.
+In progress — see `STATUS.md`. Work happens in the sandboxed claw agent
+(`lungta-claw uvoc-wasm exec`).
