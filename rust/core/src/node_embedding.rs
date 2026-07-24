@@ -17,6 +17,8 @@
 //! i64 range, numba would wrap differently -- not a concern for any
 //! fixtured or realistic case.
 
+use crate::rng::{tau_rand_int, RngState};
+
 /// Port of `make_epochs_per_sample`.
 ///
 /// PORT NOTE (cast order): `n_samples = maximum(n_epochs * (w / w.max()),
@@ -317,6 +319,76 @@ pub fn node_embedding_repr(
     }
 
     embedding
+}
+
+/// Self-driven variant of [`node_embedding_repr`] for the `evoc_clusters`
+/// pipeline (phase 9): rather than consuming a pre-recorded `rng_val` /
+/// `node_order_shuffles` (numpy-MT draws, not portable -- see PORT_NOTES.md),
+/// this draws everything from this project's own `tau_rand` RNG, advancing
+/// `state` in place. `initial_embedding = None` in the Python reference
+/// draws `random_state.normal(scale=0.25, ...)`; ported here as `tau_rand`
+/// -based standard-normal draws scaled by 0.25 when `initial_embedding` is
+/// `None`.
+///
+/// PORT NOTE (scope): this is not bit-exact with the Python reference (which
+/// only a numpy-MT replay could achieve) -- it is validated via the
+/// ARI-based end-to-end check described in `PCA_VALIDATION.md`, not the
+/// fixture-parity mechanism used elsewhere in this port.
+#[allow(clippy::too_many_arguments)]
+pub fn node_embedding_repr_self_driven(
+    graph_indptr: &[u32],
+    graph_indices: &[u32],
+    graph_data: &[f32],
+    n_vertices: usize,
+    n_components: usize,
+    n_epochs: usize,
+    initial_embedding: Option<&[f32]>,
+    initial_alpha: f32,
+    negative_sample_rate: f32,
+    noise_level: f32,
+    rng_state: &mut RngState,
+) -> Vec<f32> {
+    let embedding_init: Vec<f32> = match initial_embedding {
+        Some(e) => e.to_vec(),
+        None => (0..n_vertices * n_components)
+            .map(|_| crate::pca::next_standard_normal(rng_state) * 0.25)
+            .collect(),
+    };
+
+    let rng_val: Vec<u32> = (0..n_epochs)
+        .map(|_| (tau_rand_int(rng_state).unsigned_abs()) % (i32::MAX as u32))
+        .collect();
+
+    let mut node_order: Vec<u32> = (0..n_vertices as u32).collect();
+    let mut node_order_shuffles: Vec<Vec<u32>> = Vec::with_capacity(n_epochs);
+    for _ in 0..n_epochs {
+        fisher_yates_shuffle(&mut node_order, rng_state);
+        node_order_shuffles.push(node_order.clone());
+    }
+
+    node_embedding_repr(
+        graph_indptr,
+        graph_indices,
+        graph_data,
+        n_vertices,
+        n_components,
+        n_epochs,
+        &embedding_init,
+        initial_alpha,
+        negative_sample_rate,
+        noise_level,
+        &rng_val,
+        &node_order_shuffles,
+    )
+}
+
+/// Fisher-Yates shuffle driven by `tau_rand_int`, used by the self-driven
+/// node-embedding path (see [`node_embedding_repr_self_driven`]).
+fn fisher_yates_shuffle(v: &mut [u32], state: &mut RngState) {
+    for i in (1..v.len()).rev() {
+        let j = (tau_rand_int(state).unsigned_abs() as usize) % (i + 1);
+        v.swap(i, j);
+    }
 }
 
 /// `np.linspace(start, stop, num)` in f64.

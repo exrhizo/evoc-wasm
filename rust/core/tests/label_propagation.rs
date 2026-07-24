@@ -9,7 +9,11 @@ use uvoc_core::label_propagation::{
 use uvoc_core::rng::RngState;
 
 fn json_i64_vec(v: &serde_json::Value) -> Vec<i64> {
-    v.as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect()
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_i64().unwrap())
+        .collect()
 }
 
 fn json_f32_vec(v: &serde_json::Value) -> Vec<f32> {
@@ -25,7 +29,11 @@ fn flatten(m: &[Vec<f32>]) -> Vec<f32> {
 }
 
 fn json_u32_vec(v: &serde_json::Value) -> Vec<u32> {
-    v.as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u32).collect()
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_u64().unwrap() as u32)
+        .collect()
 }
 
 fn rng_state_from(v: &serde_json::Value) -> RngState {
@@ -107,8 +115,15 @@ fn label_prop_loop_n120() {
         .collect();
 
     let labels = vec![-1i64; n_points];
-    let result =
-        label_prop_loop(&indptr, &indices, &data, labels, &rng_state, &seed_position_draws, n_iter);
+    let result = label_prop_loop(
+        &indptr,
+        &indices,
+        &data,
+        labels,
+        &rng_state,
+        &seed_position_draws,
+        n_iter,
+    );
 
     let expected = json_i64_vec(&fixture["expected"]["partition"]);
     assert_eq!(result, expected);
@@ -176,6 +191,9 @@ fn label_propagation_init_n120() {
     for (i, (&a, &e)) in got.iter().zip(expected.iter()).enumerate() {
         let diff = (a as f64 - e as f64).abs();
         let allowed = tol_abs + tol_rel * (e as f64).abs();
-        assert!(diff <= allowed, "embedding[{i}]: actual={a} expected={e} diff={diff} allowed={allowed}");
+        assert!(
+            diff <= allowed,
+            "embedding[{i}]: actual={a} expected={e} diff={diff} allowed={allowed}"
+        );
     }
 }

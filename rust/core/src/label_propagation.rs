@@ -201,8 +201,11 @@ pub fn remap_labels(labels: &mut [i64]) -> &mut [i64] {
         unique_labels.remove(0);
     }
 
-    let mapping: std::collections::HashMap<i64, i64> =
-        unique_labels.iter().enumerate().map(|(i, &l)| (l, i as i64)).collect();
+    let mapping: std::collections::HashMap<i64, i64> = unique_labels
+        .iter()
+        .enumerate()
+        .map(|(i, &l)| (l, i as i64))
+        .collect();
     let mut next_label = unique_labels.len() as i64;
 
     for l in labels.iter_mut() {
@@ -488,7 +491,9 @@ pub fn label_propagation_init(
                 data_expander[i * n_parts + b] += m_ij * inv_sqrt_count[b];
             }
         }
-        let row_sum: f64 = data_expander[i * n_parts..i * n_parts + n_parts].iter().sum();
+        let row_sum: f64 = data_expander[i * n_parts..i * n_parts + n_parts]
+            .iter()
+            .sum();
         if row_sum != 0.0 {
             for v in data_expander[i * n_parts..i * n_parts + n_parts].iter_mut() {
                 *v /= row_sum;
@@ -511,6 +516,285 @@ pub fn label_propagation_init(
     }
 
     // result = scaling * (result - result.mean(axis=0))
+    let mut mean = vec![0.0f64; n_components];
+    for i in 0..n_points {
+        for c in 0..n_components {
+            mean[c] += result[i * n_components + c];
+        }
+    }
+    for m in mean.iter_mut() {
+        *m /= n_points as f64;
+    }
+
+    let mut out = vec![0.0f32; n_points * n_components];
+    for i in 0..n_points {
+        for c in 0..n_components {
+            out[i * n_components + c] =
+                (scaling as f64 * (result[i * n_components + c] - mean[c])) as f32;
+        }
+    }
+
+    out
+}
+
+/// Self-driven, recursive port of `label_propagation_init` for the
+/// `evoc_clusters` pipeline (phase 9). Unlike
+/// [`label_propagation_init`] (the fixture-parity, `recursive_init=False`
+/// port whose randomness is supplied explicitly and verbatim), this drives
+/// every random draw from this project's own `tau_rand` RNG, advancing
+/// `state` in place, and recurses per the reference's `recursive_init=True`
+/// default: `label_prop_loop` -> build a reduced graph -> recurse (or hit the
+/// PCA base case once the reduced graph drops below `base_init_threshold`)
+/// -> `node_embedding` on the reduced graph -> `partition_expander`
+/// upscaling back to the caller's graph size.
+///
+/// `approx_n_parts` follows the reference's exact formula
+/// (`clip(int(8*sqrt(n)), 256, 16384)` at the top level, shrinking `// 4`
+/// each recursion level) -- callers at the top of the pipeline should pass
+/// that value in; recursive calls compute it from the reduced graph's own
+/// size via the same clip (`clip(int(8*sqrt(n_reduced)), 256, 16384)`,
+/// matching `evoc_clusters`' top-level derivation, since the Python
+/// reference does not re-derive `approx_n_parts` from graph size at each
+/// recursion level -- it shrinks the CALLER's value by `// 4`).
+///
+/// PORT NOTE (scope): base case below `base_init_threshold` uses randomized
+/// PCA (see `pca.rs`) instead of sklearn's `PCA`/`SpectralEmbedding`/`MDS` --
+/// bit-exact parity there is impossible (see PORT_NOTES.md / PCA_VALIDATION.md).
+/// This whole function is validated by ARI against a real Python
+/// `evoc.EVoC` run, not bit-exact fixtures.
+#[allow(clippy::too_many_arguments)]
+pub fn label_propagation_init_recursive(
+    indptr: &[i64],
+    indices: &[i64],
+    data: &[f32],
+    n_points: usize,
+    data_full: Option<&[f32]>, // original-space rows for this graph's points, row-major, for PCA base case
+    n_features: usize,
+    n_label_prop_iter: usize,
+    n_embedding_epochs: usize,
+    approx_n_parts: usize,
+    n_components: usize,
+    scaling: f32,
+    noise_level: f32,
+    recursive_init: bool,
+    base_init_threshold: usize,
+    state: &mut RngState,
+) -> Vec<f32> {
+    if n_points < base_init_threshold {
+        // PCA base case (randomized SVD, see pca.rs).
+        let source: Vec<f32> = match data_full {
+            Some(d) => d.to_vec(),
+            None => {
+                // No original-space data available (should not happen in the
+                // evoc_clusters call path, which always threads `data`
+                // through) -- fall back to standard-normal random init so the
+                // function still returns a usable embedding.
+                (0..n_points * n_components)
+                    .map(|_| crate::pca::next_standard_normal(state))
+                    .collect()
+            }
+        };
+        let n_feat = if data_full.is_some() { n_features } else { n_components };
+        let mut result = crate::pca::randomized_pca(&source, n_points, n_feat, n_components, state);
+        // result -= result.mean(); result /= (result.max() - result.min()) / 2.0
+        let mean: f64 = result.iter().map(|&x| x as f64).sum::<f64>() / result.len() as f64;
+        let mut max_v = f32::NEG_INFINITY;
+        let mut min_v = f32::INFINITY;
+        for &v in result.iter() {
+            if v > max_v {
+                max_v = v;
+            }
+            if v < min_v {
+                min_v = v;
+            }
+        }
+        let range = ((max_v - min_v) as f64 / 2.0).max(1e-12);
+        for v in result.iter_mut() {
+            *v = ((*v as f64 - mean) / range) as f32;
+        }
+        return result;
+    }
+
+    // 1. label-propagation partition, driven by our own RNG.
+    let lp_rng_state: RngState = [
+        (tau_rand_int(state) as i64).wrapping_mul(2),
+        (tau_rand_int(state) as i64).wrapping_mul(2),
+        (tau_rand_int(state) as i64).wrapping_mul(2),
+    ];
+    let seed_position_draws: Vec<usize> = (0..approx_n_parts)
+        .map(|_| (tau_rand_int(state).unsigned_abs() as usize) % n_points)
+        .collect();
+
+    let initial_labels = vec![-1i64; n_points];
+    let partition = label_prop_loop(
+        indptr,
+        indices,
+        data,
+        initial_labels,
+        &lp_rng_state,
+        &seed_position_draws,
+        n_label_prop_iter,
+    );
+    let n_parts = (*partition.iter().max().unwrap() + 1) as usize;
+
+    let mut counts = vec![0usize; n_parts];
+    for &p in &partition {
+        counts[p as usize] += 1;
+    }
+    let inv_sqrt_count: Vec<f64> = counts.iter().map(|&c| 1.0 / (c as f64).sqrt()).collect();
+    let inv_count_l1: Vec<f64> = counts.iter().map(|&c| 1.0 / c as f64).collect();
+
+    // reduced_graph = normalized_reduction_map.T @ graph @ base_reduction_map, clipped [0,1]
+    let graph_indptr_usize: Vec<usize> = indptr.iter().map(|&x| x as usize).collect();
+    let graph_indices_usize: Vec<usize> = indices.iter().map(|&x| x as usize).collect();
+    let graph_data_f64: Vec<f64> = data.iter().map(|&x| x as f64).collect();
+
+    let mut nrm_t_indptr = vec![0usize; n_parts + 1];
+    for &p in &partition {
+        nrm_t_indptr[p as usize + 1] += 1;
+    }
+    for a in 0..n_parts {
+        nrm_t_indptr[a + 1] += nrm_t_indptr[a];
+    }
+    let mut nrm_t_indices = vec![0usize; n_points];
+    let mut nrm_t_data = vec![0.0f64; n_points];
+    {
+        let mut cursor = nrm_t_indptr.clone();
+        for i in 0..n_points {
+            let p = partition[i] as usize;
+            let pos = cursor[p];
+            nrm_t_indices[pos] = i;
+            nrm_t_data[pos] = inv_sqrt_count[p];
+            cursor[p] += 1;
+        }
+    }
+
+    let br_indptr: Vec<usize> = (0..=n_points).collect();
+    let br_indices: Vec<usize> = partition.iter().map(|&p| p as usize).collect();
+    let br_data: Vec<f64> = vec![1.0; n_points];
+
+    let (stage1_indptr, stage1_indices, stage1_data) = smmp(
+        &nrm_t_indptr,
+        &nrm_t_indices,
+        &nrm_t_data,
+        &graph_indptr_usize,
+        &graph_indices_usize,
+        &graph_data_f64,
+        n_parts,
+        n_points,
+    );
+    let (reduced_indptr_usize, reduced_indices_usize, mut reduced_data_f64) = smmp(
+        &stage1_indptr,
+        &stage1_indices,
+        &stage1_data,
+        &br_indptr,
+        &br_indices,
+        &br_data,
+        n_parts,
+        n_parts,
+    );
+    for v in reduced_data_f64.iter_mut() {
+        *v = v.clamp(0.0, 1.0);
+    }
+
+    let reduced_indptr: Vec<i64> = reduced_indptr_usize.iter().map(|&x| x as i64).collect();
+    let reduced_indices: Vec<i64> = reduced_indices_usize.iter().map(|&x| x as i64).collect();
+    let reduced_data: Vec<f32> = reduced_data_f64.iter().map(|&x| x as f32).collect();
+    let reduced_indptr_u32: Vec<u32> = reduced_indptr_usize.iter().map(|&x| x as u32).collect();
+    let reduced_indices_u32: Vec<u32> = reduced_indices_usize.iter().map(|&x| x as u32).collect();
+
+    // reduced_data (original space) for the recursive PCA base case: mean of
+    // each partition's points, matching `data_reducer @ data` where
+    // `data_reducer = normalize(normalized_reduction_map.T, norm="l1")`
+    // (row-normalized partition-indicator matrix, i.e. per-partition mean).
+    let reduced_data_full: Option<Vec<f32>> = data_full.map(|full| {
+        let mut acc = vec![0.0f64; n_parts * n_features];
+        for i in 0..n_points {
+            let p = partition[i] as usize;
+            for f in 0..n_features {
+                acc[p * n_features + f] += full[i * n_features + f] as f64 * inv_count_l1[p];
+            }
+        }
+        acc.iter().map(|&x| x as f32).collect()
+    });
+
+    let reduced_init = if recursive_init {
+        let next_approx_n_parts = (approx_n_parts / 4).max(1);
+        Some(label_propagation_init_recursive(
+            &reduced_indptr,
+            &reduced_indices,
+            &reduced_data,
+            n_parts,
+            reduced_data_full.as_deref(),
+            n_features,
+            n_label_prop_iter,
+            n_embedding_epochs.min(255),
+            next_approx_n_parts,
+            n_components,
+            scaling,
+            noise_level,
+            true,
+            base_init_threshold,
+            state,
+        ))
+    } else {
+        None
+    };
+
+    let initial_alpha = 0.001 * n_embedding_epochs as f32;
+    let reduced_layout = crate::node_embedding::node_embedding_repr_self_driven(
+        &reduced_indptr_u32,
+        &reduced_indices_u32,
+        &reduced_data,
+        n_parts,
+        n_components,
+        n_embedding_epochs,
+        reduced_init.as_deref(),
+        initial_alpha,
+        1.0,
+        noise_level,
+        state,
+    );
+
+    // partition_expander upscaling (identical algebra to label_propagation_init).
+    let mut graph_dense = vec![0.0f64; n_points * n_points];
+    for i in 0..n_points {
+        for k in indptr[i] as usize..indptr[i + 1] as usize {
+            let j = indices[k] as usize;
+            graph_dense[i * n_points + j] = data[k] as f64;
+        }
+    }
+
+    let mut data_expander = vec![0.0f64; n_points * n_parts];
+    for i in 0..n_points {
+        for j in 0..n_points {
+            let m_ij = graph_dense[i * n_points + j] * graph_dense[j * n_points + i];
+            if m_ij != 0.0 {
+                let b = partition[j] as usize;
+                data_expander[i * n_parts + b] += m_ij * inv_sqrt_count[b];
+            }
+        }
+        let row_sum: f64 = data_expander[i * n_parts..i * n_parts + n_parts].iter().sum();
+        if row_sum != 0.0 {
+            for v in data_expander[i * n_parts..i * n_parts + n_parts].iter_mut() {
+                *v /= row_sum;
+            }
+        }
+    }
+
+    let mut result = vec![0.0f64; n_points * n_components];
+    for i in 0..n_points {
+        for c in 0..n_components {
+            let mut acc = 0.0f64;
+            for b in 0..n_parts {
+                acc += data_expander[i * n_parts + b] * reduced_layout[b * n_components + c] as f64;
+            }
+            let p = partition[i] as usize;
+            let direct = reduced_layout[p * n_components + c] as f64;
+            result[i * n_components + c] = (acc + direct) / 2.0;
+        }
+    }
+
     let mut mean = vec![0.0f64; n_components];
     for i in 0..n_points {
         for c in 0..n_components {

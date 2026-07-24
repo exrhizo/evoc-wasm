@@ -17,4 +17,5 @@ pub mod label_propagation;
 pub mod nnd_heap;
 pub mod nndescent_float;
 pub mod node_embedding;
+pub mod pca;
 pub mod rng;

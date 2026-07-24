@@ -6,7 +6,11 @@ use common::{load, Tolerance};
 use uvoc_core::clustering::{build_cluster_layers, BuildClusterLayersOptions};
 
 fn json_i64_vec(v: &serde_json::Value) -> Vec<i64> {
-    v.as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect()
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_i64().unwrap())
+        .collect()
 }
 
 fn json_f32_vec(v: &serde_json::Value) -> Vec<f32> {
@@ -55,7 +59,11 @@ fn build_cluster_layers_n126() {
         .collect();
     let expected_persistence = json_f32_vec(&fixture["expected"]["persistence_scores"]);
 
-    assert_eq!(result.cluster_layers.len(), expected_layers.len(), "n layers");
+    assert_eq!(
+        result.cluster_layers.len(),
+        expected_layers.len(),
+        "n layers"
+    );
     for (l, (got, exp)) in result
         .cluster_layers
         .iter()

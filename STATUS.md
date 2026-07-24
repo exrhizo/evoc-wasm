@@ -18,6 +18,8 @@ Legend: ✅ done · 🚧 in progress · — not started
 | 7     | node_embedding       | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 8     | clustering_utilities | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 8     | clustering           | ✅       | ✅        | ✅         | ✅       | ✅        |
+| 9     | pca (randomized SVD) | n/a (ARI/reconstruction-quality based -- see `rust/core/PCA_VALIDATION.md`) | ✅ | ✅ | — | — |
+| 9     | evoc_clusters / EVoC::fit_predict | n/a (ARI-based, not bit-exact -- see `rust/core/PCA_VALIDATION.md`) | ✅ | ✅ | — | — |
 | 9     | wasm bindings + npm  | n/a      | —         | —          | —        | —         |
 | later | nndescent_int8       | —        | —         | —          | —        | —         |
 | later | nndescent_uint8      | —        | —         | —          | —        | —         |
@@ -53,8 +55,29 @@ Legend: ✅ done · 🚧 in progress · — not started
   does not implement this branch at all (documented PORT NOTE in
   `zig/src/clustering.zig`); only the fixtured `base_n_clusters=None`
   default path is ported.
-- `evoc_clusters()` / `EVoC.fit_predict()` remain explicitly out of scope
-  (sklearn PCA internals, not portable) -- see PORT_NOTES.md.
+- **SCOPE CHANGE (phase 9, Rust): `evoc_clusters()` / `EVoC::fit_predict()`
+  are now IN SCOPE and implemented** (`rust/core/src/clustering.rs`,
+  `rust/core/src/pca.rs`, plus the recursive `label_propagation_init` and
+  self-driven `node_embedding` variants in `label_propagation.rs`/
+  `node_embedding.rs`). The prior "out of scope" call (still true for the
+  bit-exact-fixture standard used everywhere else in this port) was
+  overridden: sklearn's `PCA(random_state=...)` internals genuinely cannot
+  be replayed bit-for-bit (undocumented internal randomized-SVD draws), so
+  this implements the actual Halko/Martinsson/Tropp randomized-SVD algorithm
+  sklearn's solver is based on, driven by this project's own `tau_rand` RNG
+  end-to-end instead of numpy's Mersenne Twister. Validated via
+  reconstruction-quality unit tests (`pca.rs`) and an Adjusted Rand Index
+  check against a real `evoc.EVoC` run (ARI 0.8033 on the checked-in
+  `fixtures/clustering/evoc_clusters_e2e_ari_check.json` fixture,
+  `rust/core/tests/evoc_clusters_ari.rs`, bar: ARI > 0.8) -- **see
+  `rust/core/PCA_VALIDATION.md` for the full methodology and an explicit
+  statement that this does NOT lower the bit-exact bar for any other
+  component in this port.** Zig: not yet started (this was a Rust-only
+  pass; the parallel Zig agent may pick this up separately). Out of scope
+  within this pass: `approx_n_clusters`/`binary_search_for_n_clusters`'s
+  single-layer return branch, `return_duplicates`, and the int8/uint8
+  quantized-embedding paths (consistent with the rest of this port, which
+  defers `nndescent_int8`/`nndescent_uint8` to "later").
 - **New (Zig, phase 8):** `np.argsort`'s exact unstable tie-break for
   float32 arrays is not reproducible against numpy 2.x, which dispatches
   contiguous-array sorts to a vectorized AVX-512 sorting-network
