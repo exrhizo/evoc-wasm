@@ -1,0 +1,12 @@
+[package]
+name = "uvoc-core"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+description = "From-scratch Rust port of TutteInstitute/evoc clustering (EVoC), wasm32-friendly core"
+
+[dependencies]
+# Intentionally empty: the core must stay dependency-free for lean wasm builds.
+
+[dev-dependencies]
+serde_json = "1"
