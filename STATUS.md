@@ -14,8 +14,8 @@ Legend: ✅ done · 🚧 in progress · — not started
 | 4     | graph_construction   | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 5     | boruvka              | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 6     | cluster_trees        | ✅       | ✅        | ✅         | ✅       | ✅        |
-| 7     | label_propagation    | —        | —         | —          | —        | —         |
-| 7     | node_embedding       | —        | —         | —          | —        | —         |
+| 7     | label_propagation    | ✅       | —         | —          | ✅       | ✅        |
+| 7     | node_embedding       | ✅       | —         | —          | ✅       | ✅        |
 | 8     | clustering_utilities | —        | —         | —          | —        | —         |
 | 8     | clustering           | —        | —         | —          | —        | —         |
 | 9     | wasm bindings + npm  | n/a      | —         | —          | —        | —         |
