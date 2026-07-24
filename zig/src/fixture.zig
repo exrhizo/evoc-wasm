@@ -47,11 +47,14 @@ pub fn toleranceForField(tolerance_value: std.json.Value, field: []const u8) Tol
 }
 
 /// JSON numbers may parse as .integer or .float depending on their lexical
-/// form; normalize to f64.
+/// form; normalize to f64. Out-of-range literals (e.g. the 1e999 written by
+/// the Infinity rewrite in readFixture) surface as .number_string, which
+/// parseFloat saturates to +/-inf.
 pub fn numberAsF64(v: std.json.Value) f64 {
     return switch (v) {
         .integer => |i| @floatFromInt(i),
         .float => |f| f,
+        .number_string => |s| std.fmt.parseFloat(f64, s) catch unreachable,
         else => unreachable,
     };
 }
@@ -105,6 +108,16 @@ pub fn readFixture(allocator: std.mem.Allocator, component: []const u8, case: []
     const contents = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
     defer allocator.free(contents);
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{});
+    // Python's json.dump emits bare Infinity tokens for float inf
+    // (non-standard JSON; present in e.g. nndescent/build_candidates.json).
+    // std.json rejects them, so rewrite to 1e999, which parseFloat saturates
+    // to inf ("-Infinity" becomes "-1e999"). Fixture string fields never
+    // contain the word "Infinity", so a plain textual replace is safe here.
+    const fixed_len = std.mem.replacementSize(u8, contents, "Infinity", "1e999");
+    const fixed = try allocator.alloc(u8, fixed_len);
+    defer allocator.free(fixed);
+    _ = std.mem.replace(u8, contents, "Infinity", "1e999", fixed);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, fixed, .{});
     return Fixture{ .parsed = parsed, .value = parsed.value };
 }

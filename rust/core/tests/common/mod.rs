@@ -19,19 +19,43 @@ pub fn fixtures_dir() -> PathBuf {
 }
 
 /// Load and parse a fixture JSON file, e.g. `load("rng", "tau_rand_seed_42")`.
+///
+/// Python's `json` module emits non-standard bare `Infinity` / `-Infinity`
+/// / `NaN` tokens which serde_json rejects; they are rewritten to quoted
+/// strings here and mapped back to floats by [`num_f64`]. (Fixture string
+/// values never contain these bare words, so plain substitution is safe.)
 pub fn load(component: &str, case: &str) -> serde_json::Value {
     let path = fixtures_dir().join(component).join(format!("{case}.json"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read fixture {}: {}", path.display(), e));
+    let text = text
+        .replace("-Infinity", "\u{1}NEGINF\u{1}")
+        .replace("Infinity", "\"Infinity\"")
+        .replace("\u{1}NEGINF\u{1}", "\"-Infinity\"")
+        .replace("NaN", "\"NaN\"");
     serde_json::from_str(&text)
         .unwrap_or_else(|e| panic!("failed to parse fixture {}: {}", path.display(), e))
+}
+
+/// Parse a fixture number that may be a plain JSON number or one of the
+/// string-encoded specials produced by [`load`].
+pub fn num_f64(v: &serde_json::Value) -> f64 {
+    if let Some(f) = v.as_f64() {
+        return f;
+    }
+    match v.as_str() {
+        Some("Infinity") => f64::INFINITY,
+        Some("-Infinity") => f64::NEG_INFINITY,
+        Some("NaN") => f64::NAN,
+        other => panic!("expected number, got {other:?}"),
+    }
 }
 
 /// Parse a JSON number as f64 and narrow to f32, matching PORTING.md's
 /// "exact" f32 comparison rule (JSON numbers are doubles; f32 values
 /// round-trip losslessly through double).
 pub fn as_f32(v: &serde_json::Value) -> f32 {
-    v.as_f64().expect("expected JSON number") as f32
+    num_f64(v) as f32
 }
 
 /// Assert two f32 values are bit-identical (PORTING.md "exact" tolerance).

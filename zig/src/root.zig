@@ -8,6 +8,8 @@ pub const disjoint_set = @import("disjoint_set.zig");
 pub const rng = @import("rng.zig");
 pub const distance = @import("distance.zig");
 pub const kdtree = @import("kdtree.zig");
+pub const nnd_heap = @import("nnd_heap.zig");
+pub const nndescent_float = @import("nndescent_float.zig");
 
 // Test-only fixture-loading helper (not part of the freestanding surface).
 const fixture = @import("fixture.zig");

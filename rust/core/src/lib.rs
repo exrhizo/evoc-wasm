@@ -7,4 +7,6 @@
 pub mod disjoint_set;
 pub mod rng;
 pub mod distance;
+pub mod nnd_heap;
 pub mod kdtree;
+pub mod nndescent_float;
