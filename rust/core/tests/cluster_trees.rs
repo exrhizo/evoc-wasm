@@ -10,7 +10,11 @@ use uvoc_core::cluster_trees::{
 };
 
 fn json_i64_vec(v: &serde_json::Value) -> Vec<i64> {
-    v.as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect()
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_i64().unwrap())
+        .collect()
 }
 
 fn json_f32_vec(v: &serde_json::Value) -> Vec<f32> {
@@ -83,8 +87,16 @@ fn condense_tree_n80_mcs5() {
     let min_cluster_size = fixture["inputs"]["min_cluster_size"].as_i64().unwrap();
     let ct = condense_tree(&hierarchy, min_cluster_size);
 
-    assert_eq!(ct.parent, json_i64_vec(&fixture["expected"]["parent"]), "parent");
-    assert_eq!(ct.child, json_i64_vec(&fixture["expected"]["child"]), "child");
+    assert_eq!(
+        ct.parent,
+        json_i64_vec(&fixture["expected"]["parent"]),
+        "parent"
+    );
+    assert_eq!(
+        ct.child,
+        json_i64_vec(&fixture["expected"]["child"]),
+        "child"
+    );
     assert_eq!(
         ct.child_size,
         json_i64_vec(&fixture["expected"]["child_size"]),
@@ -144,12 +156,20 @@ fn labels_and_strengths_n80_mcs5() {
 
     // stage 1: extract_leaves
     let leaves = extract_leaves(&condensed);
-    assert_eq!(leaves, json_i64_vec(&fixture["expected"]["leaves"]), "leaves");
+    assert_eq!(
+        leaves,
+        json_i64_vec(&fixture["expected"]["leaves"]),
+        "leaves"
+    );
 
     // stage 2: labels
     let labels =
         get_cluster_label_vector(&condensed, &leaves, cluster_selection_epsilon, n_samples);
-    assert_eq!(labels, json_i64_vec(&fixture["expected"]["labels"]), "labels");
+    assert_eq!(
+        labels,
+        json_i64_vec(&fixture["expected"]["labels"]),
+        "labels"
+    );
 
     // stage 3: strengths
     let strengths = get_point_membership_strength_vector(&condensed, &leaves, &labels);

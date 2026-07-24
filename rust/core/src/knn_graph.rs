@@ -179,7 +179,9 @@ mod tests {
 
     #[test]
     fn make_forest_pads_to_widest_tree() {
-        let data: Vec<f32> = (0..40).flat_map(|i| [(i % 7) as f32, (i % 3) as f32]).collect();
+        let data: Vec<f32> = (0..40)
+            .flat_map(|i| [(i % 7) as f32, (i % 3) as f32])
+            .collect();
         let mut rng_states: Vec<RngState> = vec![[1, 2, 3], [4, 5, 6]];
         let (leaf_array, width) = make_forest(&data, 2, &mut rng_states, 5, 200, false);
         // every row has the padded width; all real points 0..20 appear
@@ -198,8 +200,20 @@ mod tests {
         let leaf_array: Vec<i32> = vec![0, 1, 2, 3];
         let mut rng: RngState = [0; 3];
         seed(&mut rng, 7);
-        let (indices, distances) =
-            nn_descent(&data, 2, 2, &rng, 4, 3, 0.001, None, &leaf_array, 4, 1, true);
+        let (indices, distances) = nn_descent(
+            &data,
+            2,
+            2,
+            &rng,
+            4,
+            3,
+            0.001,
+            None,
+            &leaf_array,
+            4,
+            1,
+            true,
+        );
         for i in 0..4 {
             // self is first neighbor, transformed distance is exactly 0
             assert_eq!(indices[i * 2], i as i32);
@@ -214,7 +228,19 @@ mod tests {
         let rng_state: RngState = [11, 22, 33];
         let mut rng_states: Vec<RngState> = vec![[1, 2, 3], [4, 5, 6]];
         let (inds, dists) = knn_graph(
-            &data, 2, 3, &rng_state, &mut rng_states, 3, 200, 4, 4, 0.001, Some(0.001), true, 1,
+            &data,
+            2,
+            3,
+            &rng_state,
+            &mut rng_states,
+            3,
+            200,
+            4,
+            4,
+            0.001,
+            Some(0.001),
+            true,
+            1,
             false,
         );
         assert_eq!(inds.len(), 5 * 3);

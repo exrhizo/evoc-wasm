@@ -4,8 +4,7 @@ mod common;
 
 use common::load;
 use uvoc_core::disjoint_set::{
-    ds_find_rank, ds_find_size, ds_rank_create, ds_size_create, ds_union_by_rank,
-    ds_union_by_size,
+    ds_find_rank, ds_find_size, ds_rank_create, ds_size_create, ds_union_by_rank, ds_union_by_size,
 };
 
 #[test]
@@ -20,7 +19,10 @@ fn union_rank_n24() {
         .iter()
         .map(|pair| {
             let pair = pair.as_array().unwrap();
-            (pair[0].as_i64().unwrap() as i32, pair[1].as_i64().unwrap() as i32)
+            (
+                pair[0].as_i64().unwrap() as i32,
+                pair[1].as_i64().unwrap() as i32,
+            )
         })
         .collect();
 
@@ -37,7 +39,10 @@ fn union_rank_n24() {
         .iter()
         .map(|v| v.as_i64().unwrap() as i32)
         .collect();
-    assert_eq!(find_after_each_union, expected_find, "find_after_each_union");
+    assert_eq!(
+        find_after_each_union, expected_find,
+        "find_after_each_union"
+    );
 
     let expected_parent: Vec<i32> = fixture["expected"]["final_parent"]
         .as_array()
@@ -68,7 +73,10 @@ fn union_size_n24() {
         .iter()
         .map(|pair| {
             let pair = pair.as_array().unwrap();
-            (pair[0].as_i64().unwrap() as i32, pair[1].as_i64().unwrap() as i32)
+            (
+                pair[0].as_i64().unwrap() as i32,
+                pair[1].as_i64().unwrap() as i32,
+            )
         })
         .collect();
 
@@ -85,7 +93,10 @@ fn union_size_n24() {
         .iter()
         .map(|v| v.as_i64().unwrap() as i32)
         .collect();
-    assert_eq!(find_after_each_union, expected_find, "find_after_each_union");
+    assert_eq!(
+        find_after_each_union, expected_find,
+        "find_after_each_union"
+    );
 
     let expected_parent: Vec<i32> = fixture["expected"]["final_parent"]
         .as_array()

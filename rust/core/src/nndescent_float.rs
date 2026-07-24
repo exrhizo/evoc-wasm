@@ -287,7 +287,9 @@ pub fn make_float_forest(
     enable_nested_parallelism: bool,
 ) -> Vec<(Vec<i32>, usize)> {
     if enable_nested_parallelism {
-        make_float_forest_with_nested_parallelism(data, n_features, rng_states, leaf_size, max_depth)
+        make_float_forest_with_nested_parallelism(
+            data, n_features, rng_states, leaf_size, max_depth,
+        )
     } else {
         make_float_forest_no_nested_parallelism(data, n_features, rng_states, leaf_size, max_depth)
     }
@@ -1150,7 +1152,9 @@ mod tests {
 
     #[test]
     fn split_partitions_all_points() {
-        let data: Vec<f32> = (0..20).flat_map(|i| [i as f32, (i * 7 % 13) as f32]).collect();
+        let data: Vec<f32> = (0..20)
+            .flat_map(|i| [i as f32, (i * 7 % 13) as f32])
+            .collect();
         let indices: Vec<i32> = (0..20).collect();
         let mut rng: RngState = [0; 3];
         seed(&mut rng, 42);
@@ -1164,7 +1168,10 @@ mod tests {
     fn split_identical_points_degenerate_reassigns_randomly() {
         // all-identical points: every margin is ~0, coin flips classify;
         // whatever happens, the result must still be a partition.
-        let data: Vec<f32> = std::iter::repeat([1.0f32, 2.0]).take(10).flatten().collect();
+        let data: Vec<f32> = std::iter::repeat([1.0f32, 2.0])
+            .take(10)
+            .flatten()
+            .collect();
         let indices: Vec<i32> = (0..10).collect();
         let mut rng: RngState = [0; 3];
         seed(&mut rng, 7);
@@ -1191,7 +1198,9 @@ mod tests {
 
     #[test]
     fn forest_variants_agree_and_advance_states_identically() {
-        let data: Vec<f32> = (0..48).flat_map(|i| [(i % 7) as f32, (i % 3) as f32]).collect();
+        let data: Vec<f32> = (0..48)
+            .flat_map(|i| [(i % 7) as f32, (i % 3) as f32])
+            .collect();
         let mut states_a: Vec<RngState> = vec![[11, 22, 33], [44, 55, 66]];
         let mut states_b = states_a.clone();
         let fa = make_float_forest(&data, 2, &mut states_a, 5, 200, true);

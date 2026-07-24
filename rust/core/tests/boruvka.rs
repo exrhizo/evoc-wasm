@@ -41,12 +41,7 @@ fn json_f32_matrix(v: &serde_json::Value) -> (Vec<f32>, usize) {
 
 /// Assert edge endpoints (exact) and distances (tolerance) against a fixture
 /// storing separate point_a / point_b / distance arrays.
-fn assert_edges(
-    edges: &[[f32; 3]],
-    fixture: &serde_json::Value,
-    dist_tol: &Tolerance,
-    ctx: &str,
-) {
+fn assert_edges(edges: &[[f32; 3]], fixture: &serde_json::Value, dist_tol: &Tolerance, ctx: &str) {
     let point_a: Vec<i32> = fixture["expected"]["point_a"]
         .as_array()
         .unwrap()

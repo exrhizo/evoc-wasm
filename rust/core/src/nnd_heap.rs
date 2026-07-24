@@ -95,7 +95,12 @@ pub fn deheap_sort(indices: &mut [i32], distances: &mut [f32], n_cols: usize) {
 ///
 /// PORT NOTE: reference numba locals use u16 loop indices -- behaviorally
 /// irrelevant for heap sizes < 32768; we use usize.
-pub fn build_candidates_heap_push(priorities: &mut [f32], indices: &mut [i32], p: f32, n: i32) -> i32 {
+pub fn build_candidates_heap_push(
+    priorities: &mut [f32],
+    indices: &mut [i32],
+    p: f32,
+    n: i32,
+) -> i32 {
     if p >= priorities[0] {
         return 0;
     }

@@ -113,10 +113,19 @@ fn run_neighbor_graph_case(case: &str, symmetrize: bool) {
     let (knn_dists, _) = json_f32_matrix(&fixture["inputs"]["knn_dists_transformed"]);
     let n_neighbors_f = common::as_f32(&fixture["inputs"]["n_neighbors"]);
 
-    let graph =
-        neighbor_graph_matrix(n_neighbors_f, &knn_indices, &knn_dists, n_neighbors, symmetrize);
+    let graph = neighbor_graph_matrix(
+        n_neighbors_f,
+        &knn_indices,
+        &knn_dists,
+        n_neighbors,
+        symmetrize,
+    );
 
-    assert_eq!(graph.indptr, json_i32_vec(&fixture["expected"]["indptr"]), "{case}: indptr");
+    assert_eq!(
+        graph.indptr,
+        json_i32_vec(&fixture["expected"]["indptr"]),
+        "{case}: indptr"
+    );
     assert_eq!(
         graph.indices,
         json_i32_vec(&fixture["expected"]["indices"]),
@@ -156,8 +165,9 @@ fn knn_graph_n120_d8_k10_seed42() {
         .collect();
     let leaf_size = fixture["inputs"]["leaf_size"].as_u64().unwrap() as usize;
     let n_iters = fixture["inputs"]["n_iters"].as_u64().unwrap() as usize;
-    let effective_max_candidates =
-        fixture["inputs"]["effective_max_candidates"].as_u64().unwrap() as usize;
+    let effective_max_candidates = fixture["inputs"]["effective_max_candidates"]
+        .as_u64()
+        .unwrap() as usize;
     let delta = fixture["inputs"]["delta"].as_f64().unwrap();
     let delta_improv = fixture["inputs"]["delta_improv"].as_f64();
     let use_sorted_updates = fixture["inputs"]["use_sorted_updates"].as_bool().unwrap();

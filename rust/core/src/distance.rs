@@ -86,7 +86,11 @@ pub fn fast_bit_jaccard(x: &[u8], y: &[u8]) -> f32 {
 /// docstring's "REQUIRES: Array size divisible by 8."
 pub fn fast_bit_jaccard_u64(x: &[u8], y: &[u8]) -> f32 {
     debug_assert_eq!(x.len(), y.len());
-    debug_assert_eq!(x.len() % 8, 0, "fast_bit_jaccard_u64 requires len divisible by 8");
+    debug_assert_eq!(
+        x.len() % 8,
+        0,
+        "fast_bit_jaccard_u64 requires len divisible by 8"
+    );
 
     let mut result: u64 = 0;
     let mut denom: u64 = 0;

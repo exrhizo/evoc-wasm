@@ -89,11 +89,23 @@ fn flagged_heap_push_fixture() {
     }
 
     let expected_priorities = json_f32_vec(&fixture["expected"]["heap_priorities"]);
-    for (i, (&actual, &exp)) in priorities.iter().zip(expected_priorities.iter()).enumerate() {
+    for (i, (&actual, &exp)) in priorities
+        .iter()
+        .zip(expected_priorities.iter())
+        .enumerate()
+    {
         common::assert_f32_exact(actual, exp, &format!("heap_priorities[{i}]"));
     }
-    assert_eq!(indices, json_i32_vec(&fixture["expected"]["heap_indices"]), "heap_indices");
-    assert_eq!(flags, json_u8_vec(&fixture["expected"]["heap_flags"]), "heap_flags");
+    assert_eq!(
+        indices,
+        json_i32_vec(&fixture["expected"]["heap_indices"]),
+        "heap_indices"
+    );
+    assert_eq!(
+        flags,
+        json_u8_vec(&fixture["expected"]["heap_flags"]),
+        "heap_flags"
+    );
 }
 
 #[test]
@@ -125,7 +137,8 @@ fn build_candidates_fixture() {
     let rng_state = json_rng_state(&fixture["inputs"]["rng_state"]);
     let n_threads = fixture["inputs"]["n_threads"].as_u64().unwrap() as usize;
 
-    let (new_c, old_c) = build_candidates(&mut current_graph, max_candidates, &rng_state, n_threads);
+    let (new_c, old_c) =
+        build_candidates(&mut current_graph, max_candidates, &rng_state, n_threads);
 
     let (expected_new, exp_mc) = json_i32_matrix(&fixture["expected"]["new_candidate_indices"]);
     assert_eq!(exp_mc, max_candidates);
@@ -164,7 +177,14 @@ fn make_float_forest_fixture() {
     let leaf_size = fixture["inputs"]["leaf_size"].as_u64().unwrap() as usize;
     let max_depth = fixture["inputs"]["max_depth"].as_i64().unwrap();
 
-    let forest = make_float_forest(&data, n_features, &mut rng_states, leaf_size, max_depth, true);
+    let forest = make_float_forest(
+        &data,
+        n_features,
+        &mut rng_states,
+        leaf_size,
+        max_depth,
+        true,
+    );
 
     let expected_arrays = fixture["expected"]["leaf_arrays"].as_array().unwrap();
     assert_eq!(forest.len(), expected_arrays.len(), "n_trees");
@@ -230,7 +250,11 @@ fn run_nn_descent_case(case: &str, sorted: bool) {
         dist_tol.assert_close(
             actual,
             exp,
-            &format!("{case}: distances[{}][{}]", i / n_neighbors, i % n_neighbors),
+            &format!(
+                "{case}: distances[{}][{}]",
+                i / n_neighbors,
+                i % n_neighbors
+            ),
         );
     }
 }

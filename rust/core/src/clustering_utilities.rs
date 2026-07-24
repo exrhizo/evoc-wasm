@@ -314,7 +314,12 @@ pub fn jaccard_similarity(set_a_array: &[i64], set_b_array: &[i64]) -> f64 {
 /// X and deaths[i] > X` (half-open `[birth, death)` window read at a point
 /// -- a different convention from `compute_total_persistence`'s documented
 /// `(birth, death]` interval semantics).
-pub fn estimate_cluster_similarity(births: &[f32], deaths: &[f32], birth_a: f32, birth_b: f32) -> f64 {
+pub fn estimate_cluster_similarity(
+    births: &[f32],
+    deaths: &[f32],
+    birth_a: f32,
+    birth_b: f32,
+) -> f64 {
     let clusters_a: Vec<i64> = (0..births.len() as i64)
         .filter(|&i| births[i as usize] <= birth_a && deaths[i as usize] > birth_a)
         .collect();
@@ -411,9 +416,7 @@ pub type ClusterTreeEdge = (usize, i64, usize, i64);
 /// virtual root `(len(labels), 0)`.
 pub fn _build_cluster_tree(labels: &[Vec<i64>]) -> Vec<ClusterTreeEdge> {
     let mut mapping: Vec<ClusterTreeEdge> = Vec::new();
-    let mut found: Vec<HashSet<i64>> = (0..labels.len())
-        .map(|_| HashSet::from([-1i64]))
-        .collect();
+    let mut found: Vec<HashSet<i64>> = (0..labels.len()).map(|_| HashSet::from([-1i64])).collect();
 
     for upper_layer in 1..labels.len() {
         let mut upper_unique: Vec<i64> = labels[upper_layer].clone();
@@ -526,13 +529,18 @@ mod tests {
 
     #[test]
     fn find_peaks_monotone_has_no_peaks() {
-        assert_eq!(find_peaks(&[5.0, 4.0, 3.0, 2.0, 1.0, 0.0]), Vec::<usize>::new());
+        assert_eq!(
+            find_peaks(&[5.0, 4.0, 3.0, 2.0, 1.0, 0.0]),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
     fn find_peaks_plateau_midpoint_rounds_left() {
         // plateau at indices 11..=12 (width 2) -> midpoint (11+12)//2 = 11.
-        let x = [0.0, 1.0, 3.0, 2.0, 1.0, 0.0, 2.0, 5.0, 3.0, 1.0, 0.0, 4.0, 4.0, 1.0];
+        let x = [
+            0.0, 1.0, 3.0, 2.0, 1.0, 0.0, 2.0, 5.0, 3.0, 1.0, 0.0, 4.0, 4.0, 1.0,
+        ];
         assert_eq!(find_peaks(&x), vec![2, 7, 11]);
     }
 
@@ -578,7 +586,16 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(
             sorted,
-            vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3), (4, 5), (4, 6)]
+            vec![
+                (0, 1),
+                (0, 2),
+                (0, 3),
+                (1, 2),
+                (1, 3),
+                (2, 3),
+                (4, 5),
+                (4, 6)
+            ]
         );
     }
 }

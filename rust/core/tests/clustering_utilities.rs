@@ -4,15 +4,19 @@ mod common;
 
 use common::{load, Tolerance};
 use uvoc_core::cluster_trees::CondensedTree;
+use uvoc_core::cluster_trees::LinkageTree;
 use uvoc_core::clustering_utilities::{
     _binary_search_for_n_clusters, build_cluster_tree, compute_total_persistence,
     estimate_cluster_similarity, extract_clusters_by_id, find_duplicates, find_peaks,
     jaccard_similarity, min_cluster_size_barcode, select_diverse_peaks,
 };
-use uvoc_core::cluster_trees::LinkageTree;
 
 fn json_i64_vec(v: &serde_json::Value) -> Vec<i64> {
-    v.as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect()
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_i64().unwrap())
+        .collect()
 }
 
 fn json_f32_vec(v: &serde_json::Value) -> Vec<f32> {
@@ -132,7 +136,9 @@ fn select_diverse_peaks_seed45() {
     let sizes = json_f32_vec(&fixture["inputs"]["sizes"]);
     let births = json_f32_vec(&fixture["inputs"]["births"]);
     let deaths = json_f32_vec(&fixture["inputs"]["deaths"]);
-    let min_similarity_threshold = fixture["inputs"]["min_similarity_threshold"].as_f64().unwrap();
+    let min_similarity_threshold = fixture["inputs"]["min_similarity_threshold"]
+        .as_f64()
+        .unwrap();
     let max_layers = fixture["inputs"]["max_layers"].as_i64().unwrap() as usize;
 
     let selected = select_diverse_peaks(
@@ -151,7 +157,10 @@ fn select_diverse_peaks_seed45() {
 
 #[test]
 fn extract_clusters_by_id_seed45_peak1() {
-    let fixture = load("clustering_utilities", "extract_clusters_by_id_seed45_peak1");
+    let fixture = load(
+        "clustering_utilities",
+        "extract_clusters_by_id_seed45_peak1",
+    );
     let strengths_tol = Tolerance::parse_for_field(&fixture["tolerance"], "strengths");
 
     let ct = condensed_from(&fixture["inputs"]["condensed_tree"]);
@@ -313,4 +322,3 @@ fn build_cluster_tree_3layers() {
 
     assert_eq!(got, expected);
 }
-

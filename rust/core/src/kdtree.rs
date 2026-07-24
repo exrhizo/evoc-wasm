@@ -305,16 +305,26 @@ fn _partition_indices(
     loop {
         // Find element from left that should be on right
         while i <= j
-            && _compare_indices(data, n_features, axis, idx_array[i as usize], pivot_original_idx)
-                < 0
+            && _compare_indices(
+                data,
+                n_features,
+                axis,
+                idx_array[i as usize],
+                pivot_original_idx,
+            ) < 0
         {
             i += 1;
         }
 
         // Find element from right that should be on left
         while i <= j
-            && _compare_indices(data, n_features, axis, idx_array[j as usize], pivot_original_idx)
-                >= 0
+            && _compare_indices(
+                data,
+                n_features,
+                axis,
+                idx_array[j as usize],
+                pivot_original_idx,
+            ) >= 0
         {
             j -= 1;
         }
@@ -397,7 +407,9 @@ fn _introselect(
 
     // Calculate maximum recursion depth (2 * log2(size))
     let max_depth = 2 * ((size as f64).log2() as usize);
-    _introselect_impl(data, n_features, idx_array, axis, left, right, nth, max_depth);
+    _introselect_impl(
+        data, n_features, idx_array, axis, left, right, nth, max_depth,
+    );
 }
 
 /// Port of `_recursive_build_tree`.
@@ -482,10 +494,13 @@ fn _recursive_build_tree(
 
 /// Port of `build_kdtree`. `data` is row-major n_samples x n_features.
 pub fn build_kdtree(data: &[f32], n_features: usize, leaf_size: usize) -> NumbaKDTree {
-    assert!(n_features > 0 && data.len() % n_features == 0);
+    assert!(n_features > 0 && data.len().is_multiple_of(n_features));
     let n_samples = data.len() / n_features;
 
-    assert!(leaf_size >= 1, "leaf_size must be greater than or equal to 1");
+    assert!(
+        leaf_size >= 1,
+        "leaf_size must be greater than or equal to 1"
+    );
 
     // determine number of levels in the tree, and from this
     // the number of nodes in the tree.  This results in leaf nodes
@@ -561,8 +576,16 @@ pub fn point_to_node_lower_bound_rdist(upper: &[f32], lower: &[f32], pt: &[f32])
     let mut result: f32 = 0.0;
     let dim = pt.len();
     for i in 0..dim {
-        let d_lo: f32 = if upper[i] > pt[i] { upper[i] - pt[i] } else { 0.0 };
-        let d_hi: f32 = if pt[i] > lower[i] { pt[i] - lower[i] } else { 0.0 };
+        let d_lo: f32 = if upper[i] > pt[i] {
+            upper[i] - pt[i]
+        } else {
+            0.0
+        };
+        let d_hi: f32 = if pt[i] > lower[i] {
+            pt[i] - lower[i]
+        } else {
+            0.0
+        };
         let d: f32 = d_lo + d_hi;
         result += d * d;
     }
@@ -711,8 +734,11 @@ pub fn tree_query_recursion(
     else {
         let left = 2 * node + 1;
         let right = left + 1;
-        let dist_lower_bound_left =
-            point_to_node_lower_bound_rdist(tree.bounds_lower(left), tree.bounds_upper(left), point);
+        let dist_lower_bound_left = point_to_node_lower_bound_rdist(
+            tree.bounds_lower(left),
+            tree.bounds_upper(left),
+            point,
+        );
         let dist_lower_bound_right = point_to_node_lower_bound_rdist(
             tree.bounds_lower(right),
             tree.bounds_upper(right),
@@ -802,7 +828,10 @@ mod tests {
         // where every spread is zero (split dim falls back to 0, introselect
         // ties break on index).
         let n = 40;
-        let data: Vec<f32> = std::iter::repeat([3.0f32, -1.0]).take(n).flatten().collect();
+        let data: Vec<f32> = std::iter::repeat([3.0f32, -1.0])
+            .take(n)
+            .flatten()
+            .collect();
         let tree = build_kdtree(&data, 2, 5);
 
         // idx_array must remain a permutation of 0..n
@@ -871,10 +900,19 @@ mod tests {
         // reference call convention: (lower, upper, pt)
         let lower = [0.0f32, 0.0];
         let upper = [1.0f32, 1.0];
-        assert_eq!(point_to_node_lower_bound_rdist(&lower, &upper, &[0.5, 0.5]), 0.0);
+        assert_eq!(
+            point_to_node_lower_bound_rdist(&lower, &upper, &[0.5, 0.5]),
+            0.0
+        );
         // outside below dim 0 by 0.5 -> 0.25
-        assert_eq!(point_to_node_lower_bound_rdist(&lower, &upper, &[-0.5, 0.5]), 0.25);
+        assert_eq!(
+            point_to_node_lower_bound_rdist(&lower, &upper, &[-0.5, 0.5]),
+            0.25
+        );
         // outside above dim 1 by 2 -> 4
-        assert_eq!(point_to_node_lower_bound_rdist(&lower, &upper, &[0.5, 3.0]), 4.0);
+        assert_eq!(
+            point_to_node_lower_bound_rdist(&lower, &upper, &[0.5, 3.0]),
+            4.0
+        );
     }
 }

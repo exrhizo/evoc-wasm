@@ -244,23 +244,55 @@ pub fn condense_tree(hierarchy: &LinkageTree, min_cluster_size: i64) -> Condense
         } else if left_count < min_cluster_size && right_count >= min_cluster_size {
             relabel[right as usize] = parent_node;
             idx = eliminate_branch(
-                left, parent_node, lambda_value, &mut parents, &mut children, &mut lambdas, idx,
-                &mut ignore, hierarchy, num_points,
+                left,
+                parent_node,
+                lambda_value,
+                &mut parents,
+                &mut children,
+                &mut lambdas,
+                idx,
+                &mut ignore,
+                hierarchy,
+                num_points,
             );
         } else if left_count >= min_cluster_size && right_count < min_cluster_size {
             relabel[left as usize] = parent_node;
             idx = eliminate_branch(
-                right, parent_node, lambda_value, &mut parents, &mut children, &mut lambdas, idx,
-                &mut ignore, hierarchy, num_points,
+                right,
+                parent_node,
+                lambda_value,
+                &mut parents,
+                &mut children,
+                &mut lambdas,
+                idx,
+                &mut ignore,
+                hierarchy,
+                num_points,
             );
         } else if left_count < min_cluster_size && right_count < min_cluster_size {
             idx = eliminate_branch(
-                left, parent_node, lambda_value, &mut parents, &mut children, &mut lambdas, idx,
-                &mut ignore, hierarchy, num_points,
+                left,
+                parent_node,
+                lambda_value,
+                &mut parents,
+                &mut children,
+                &mut lambdas,
+                idx,
+                &mut ignore,
+                hierarchy,
+                num_points,
             );
             idx = eliminate_branch(
-                right, parent_node, lambda_value, &mut parents, &mut children, &mut lambdas, idx,
-                &mut ignore, hierarchy, num_points,
+                right,
+                parent_node,
+                lambda_value,
+                &mut parents,
+                &mut children,
+                &mut lambdas,
+                idx,
+                &mut ignore,
+                hierarchy,
+                num_points,
             );
         } else {
             relabel[left as usize] = next_label;
@@ -318,7 +350,9 @@ pub fn extract_leaves(condensed_tree: &CondensedTree) -> Vec<i64> {
         }
     }
 
-    (0..n_nodes).filter(|&i| leaf_indicator[i as usize]).collect()
+    (0..n_nodes)
+        .filter(|&i| leaf_indicator[i as usize])
+        .collect()
 }
 
 /// Port of `score_condensed_tree_nodes`. Returns `(order, scores)` where
@@ -894,7 +928,10 @@ mod tests {
     fn in_set_parallel_membership() {
         let ct = synthetic_cluster_tree();
         let targets: HashSet<i64> = [5i64, 6].into_iter().collect();
-        assert_eq!(in_set_parallel(&ct.parent, &targets), vec![true, true, true, true]);
+        assert_eq!(
+            in_set_parallel(&ct.parent, &targets),
+            vec![true, true, true, true]
+        );
     }
 
     #[test]

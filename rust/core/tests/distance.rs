@@ -118,7 +118,11 @@ fn fast_bit_jaccard_pairs() {
         let actual = fast_bit_jaccard(&x, &y);
         tolerance.assert_close(actual, exp, &format!("fast_bit_jaccard pair {i}"));
 
-        assert_eq!(x.len() % 8, 0, "fast_bit_jaccard_u64 pair {i}: len must be divisible by 8");
+        assert_eq!(
+            x.len() % 8,
+            0,
+            "fast_bit_jaccard_u64 pair {i}: len must be divisible by 8"
+        );
         let actual_u64 = fast_bit_jaccard_u64(&x, &y);
         tolerance.assert_close(
             actual_u64,

@@ -10,9 +10,7 @@
 //! to `reproducible=False` (it only bounds multithreaded races).
 
 use crate::disjoint_set::{ds_find_rank, ds_rank_create, ds_union_by_rank, RankDisjointSet};
-use crate::kdtree::{
-    parallel_tree_query, point_to_node_lower_bound_rdist, rdist, NumbaKDTree,
-};
+use crate::kdtree::{parallel_tree_query, point_to_node_lower_bound_rdist, rdist, NumbaKDTree};
 
 /// Port of `merge_components`. `candidate_neighbors[i]` / `..._distances[i]`
 /// hold, for point `i`, its best cross-component candidate; `point_components`
@@ -156,8 +154,7 @@ fn component_aware_query_recursion(
     else if is_leaf {
         for i in idx_start..idx_end {
             let idx = tree.idx_array[i];
-            if point_components[idx] != current_component
-                && core_distances[idx] < *component_bound
+            if point_components[idx] != current_component && core_distances[idx] < *component_bound
             {
                 let d = rdist(point, tree_data_row(tree, idx))
                     .max(current_core_distance)
@@ -189,24 +186,60 @@ fn component_aware_query_recursion(
 
         if dist_lower_bound_left <= dist_lower_bound_right {
             component_aware_query_recursion(
-                tree, left, point, heap_p, heap_i, current_core_distance, core_distances,
-                current_component, node_components, point_components, dist_lower_bound_left,
+                tree,
+                left,
+                point,
+                heap_p,
+                heap_i,
+                current_core_distance,
+                core_distances,
+                current_component,
+                node_components,
+                point_components,
+                dist_lower_bound_left,
                 component_bound,
             );
             component_aware_query_recursion(
-                tree, right, point, heap_p, heap_i, current_core_distance, core_distances,
-                current_component, node_components, point_components, dist_lower_bound_right,
+                tree,
+                right,
+                point,
+                heap_p,
+                heap_i,
+                current_core_distance,
+                core_distances,
+                current_component,
+                node_components,
+                point_components,
+                dist_lower_bound_right,
                 component_bound,
             );
         } else {
             component_aware_query_recursion(
-                tree, right, point, heap_p, heap_i, current_core_distance, core_distances,
-                current_component, node_components, point_components, dist_lower_bound_right,
+                tree,
+                right,
+                point,
+                heap_p,
+                heap_i,
+                current_core_distance,
+                core_distances,
+                current_component,
+                node_components,
+                point_components,
+                dist_lower_bound_right,
                 component_bound,
             );
             component_aware_query_recursion(
-                tree, left, point, heap_p, heap_i, current_core_distance, core_distances,
-                current_component, node_components, point_components, dist_lower_bound_left,
+                tree,
+                left,
+                point,
+                heap_p,
+                heap_i,
+                current_core_distance,
+                core_distances,
+                current_component,
+                node_components,
+                point_components,
+                dist_lower_bound_left,
                 component_bound,
             );
         }
@@ -587,7 +620,10 @@ mod tests {
     #[test]
     fn all_identical_points_mst_is_zero_length() {
         let n = 8;
-        let data: Vec<f32> = std::iter::repeat([2.0f32, -1.0]).take(n).flatten().collect();
+        let data: Vec<f32> = std::iter::repeat([2.0f32, -1.0])
+            .take(n)
+            .flatten()
+            .collect();
         let tree = build_kdtree(&data, 2, 40);
         let edges = parallel_boruvka(&tree, 1, 1, false);
         assert_eq!(edges.len(), n - 1);
