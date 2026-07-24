@@ -72,6 +72,20 @@ impl Tolerance {
         Tolerance::Rel { rel, abs }
     }
 
+    /// Parse a fixture's `tolerance` field that may be per-field, e.g.
+    /// `{"default": "exact", "fields": {"radius": {"rel": 1e-5}}}`, and
+    /// return the tolerance applying to `field`. The plain `"exact"` /
+    /// `{"rel": ..}` forms apply uniformly to every field.
+    pub fn parse_for_field(v: &serde_json::Value, field: &str) -> Self {
+        if v.get("default").is_some() {
+            if let Some(t) = v["fields"].get(field) {
+                return Tolerance::parse(t);
+            }
+            return Tolerance::parse(&v["default"]);
+        }
+        Tolerance::parse(v)
+    }
+
     pub fn assert_close(&self, actual: f32, expected: f32, context: &str) {
         match self {
             Tolerance::Exact => assert_f32_exact(actual, expected, context),

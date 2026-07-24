@@ -4,6 +4,76 @@
 
 const std = @import("std");
 
+/// Parsed form of a fixture's `tolerance` field. Three JSON shapes exist:
+///   "exact"                                  -> .exact
+///   {"rel": R} / {"rel": R, "abs": A}        -> .approx
+///   {"default": ..., "fields": {name: ...}}  -> per-field (resolve with
+///                                               toleranceForField)
+pub const Tolerance = union(enum) {
+    exact,
+    approx: Approx,
+
+    pub const Approx = struct { rel: f64, abs: f64 };
+};
+
+fn toleranceFromValue(v: std.json.Value) Tolerance {
+    switch (v) {
+        .string => |s| {
+            std.debug.assert(std.mem.eql(u8, s, "exact"));
+            return .exact;
+        },
+        .object => |o| {
+            const rel = if (o.get("rel")) |r| numberAsF64(r) else 0.0;
+            const abs = if (o.get("abs")) |a| numberAsF64(a) else 0.0;
+            return .{ .approx = .{ .rel = rel, .abs = abs } };
+        },
+        else => unreachable,
+    }
+}
+
+/// Resolves the tolerance that applies to `field` given a fixture's raw
+/// `tolerance` JSON value, handling all three schema shapes.
+pub fn toleranceForField(tolerance_value: std.json.Value, field: []const u8) Tolerance {
+    if (tolerance_value == .object) {
+        const o = tolerance_value.object;
+        if (o.get("fields") != null or o.get("default") != null) {
+            if (o.get("fields")) |fields| {
+                if (fields.object.get(field)) |fv| return toleranceFromValue(fv);
+            }
+            return toleranceFromValue(o.get("default").?);
+        }
+    }
+    return toleranceFromValue(tolerance_value);
+}
+
+/// JSON numbers may parse as .integer or .float depending on their lexical
+/// form; normalize to f64.
+pub fn numberAsF64(v: std.json.Value) f64 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => unreachable,
+    };
+}
+
+/// Asserts `got` matches the fixture value `want` under `tol`. "Exact" f32
+/// comparison means: cast the fixture f64 to f32 and compare bit patterns.
+pub fn expectF32(tol: Tolerance, got: f32, want: f64) !void {
+    switch (tol) {
+        .exact => {
+            const want_f32: f32 = @floatCast(want);
+            try std.testing.expectEqual(@as(u32, @bitCast(want_f32)), @as(u32, @bitCast(got)));
+        },
+        .approx => |a| {
+            const diff = @abs(@as(f64, got) - want);
+            if (diff <= a.abs) return;
+            if (diff <= a.rel * @abs(want)) return;
+            std.debug.print("expectF32: got {e} want {e} (diff {e}, rel {e}, abs {e})\n", .{ got, want, diff, a.rel, a.abs });
+            return error.TestExpectedApproxEq;
+        },
+    }
+}
+
 pub const Fixture = struct {
     parsed: std.json.Parsed(std.json.Value),
     value: std.json.Value,

@@ -7,3 +7,4 @@
 pub mod disjoint_set;
 pub mod rng;
 pub mod distance;
+pub mod kdtree;
