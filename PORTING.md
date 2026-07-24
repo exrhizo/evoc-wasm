@@ -74,6 +74,14 @@ signature), int8 inner product accumulates in i32. Match them exactly.
 }
 ```
 
+Mixed-precision components may use a per-field tolerance object instead:
+
+```json
+"tolerance": {"default": "exact", "fields": {"radius": {"rel": 1e-5, "abs": 1e-7}}}
+```
+
+(`fields` keys are `expected` field names; anything not listed uses `default`.)
+
 JSON numbers are doubles; f32 values round-trip losslessly through double, so
 "exact" f32 comparison means: parse as f64, cast to f32, compare bits.
 i64 values in fixtures are within 2^53 or stored as strings (none needed yet).

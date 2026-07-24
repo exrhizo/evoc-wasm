@@ -18,6 +18,11 @@ import sys
 
 import numpy as np
 
+# The WASM target is single-threaded; parallel numba kernels can partition
+# work (and consume per-thread RNG streams) differently by thread count, so
+# ground truth must be generated with exactly one thread.
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
 EVOC_REF = os.environ.get("EVOC_REF", "/scratch/evoc-reference")
 sys.path.insert(0, EVOC_REF)
 
@@ -175,10 +180,149 @@ def gen_distance():
     )
 
 
+def gen_kdtree():
+    from evoc.numba_kdtree import (
+        build_kdtree,
+        rdist,
+        point_to_node_lower_bound_rdist,
+        simple_heap_push,
+        deheap_sort,
+        parallel_tree_query,
+    )
+
+    rng = np.random.RandomState(1234)
+
+    # --- build ---
+    build_cases = [
+        ("n100_d4_leaf10", 100, 4, 10),
+        ("n37_d3_leaf5", 37, 3, 5),
+        ("n20_d2_leaf40_single_node", 20, 2, 40),
+    ]
+    datasets = {}
+    for case, n, d, leaf_size in build_cases:
+        data = rng.normal(size=(n, d)).astype(np.float32)
+        datasets[case] = (data, leaf_size)
+        tree = build_kdtree(data, leaf_size=leaf_size)
+        write(
+            "kdtree",
+            f"build_{case}",
+            {"default": "exact", "fields": {"radius": {"rel": 1e-5, "abs": 1e-7}}},
+            {"data": data.tolist(), "leaf_size": leaf_size},
+            {
+                "idx_array": [int(i) for i in tree.idx_array],
+                "idx_start": [int(i) for i in tree.idx_start],
+                "idx_end": [int(i) for i in tree.idx_end],
+                "is_leaf": [bool(b) for b in tree.is_leaf],
+                "radius": [float(r) for r in tree.radius],
+                "node_bounds_lower": tree.node_bounds[0].tolist(),
+                "node_bounds_upper": tree.node_bounds[1].tolist(),
+            },
+        )
+
+    # --- rdist / point_to_node_lower_bound_rdist ---
+    pairs = []
+    for dim in [2, 4, 16]:
+        x = rng.normal(size=dim).astype(np.float32)
+        y = rng.normal(size=dim).astype(np.float32)
+        pairs.append((x, y))
+    pairs.append((pairs[0][0], pairs[0][0]))  # identical -> 0
+    write(
+        "kdtree",
+        "rdist",
+        {"rel": 1e-5, "abs": 1e-7},
+        {"pairs": [{"x": x.tolist(), "y": y.tolist()} for x, y in pairs]},
+        {"values": [float(rdist(x, y)) for x, y in pairs]},
+    )
+
+    lb_cases = []
+    for dim in [2, 4, 16]:
+        lower = rng.normal(size=dim).astype(np.float32)
+        upper = (lower + np.abs(rng.normal(size=dim))).astype(np.float32)
+        inside = ((lower + upper) / 2).astype(np.float32)
+        outside = (upper + np.abs(rng.normal(size=dim))).astype(np.float32)
+        below = (lower - np.abs(rng.normal(size=dim))).astype(np.float32)
+        for pt in (inside, outside, below):
+            lb_cases.append((lower, upper, pt))
+    write(
+        "kdtree",
+        "point_to_node_lower_bound_rdist",
+        {"rel": 1e-5, "abs": 1e-7},
+        {
+            "note": "call as in the reference: fn(bounds_lower, bounds_upper, pt); "
+                    "the reference's parameter names are swapped vs the caller",
+            "cases": [
+                {"bounds_lower": lo.tolist(), "bounds_upper": up.tolist(), "pt": pt.tolist()}
+                for lo, up, pt in lb_cases
+            ],
+        },
+        {
+            "values": [
+                float(point_to_node_lower_bound_rdist(lo, up, pt))
+                for lo, up, pt in lb_cases
+            ]
+        },
+    )
+
+    # --- simple_heap_push + deheap_sort ---
+    k = 7
+    heap_p = np.full(k, np.inf, dtype=np.float32)
+    heap_i = np.full(k, -1, dtype=np.int32)
+    pushes = []
+    push_returns = []
+    for m in range(25):
+        p = float(np.float32(rng.uniform(0.0, 10.0)))
+        pushes.append({"p": p, "n": m})
+        push_returns.append(
+            int(simple_heap_push(heap_p, heap_i, np.float32(p), np.int32(m)))
+        )
+    heap_after_p = heap_p.copy()
+    heap_after_i = heap_i.copy()
+    sorted_p, sorted_i = deheap_sort(
+        heap_p.reshape(1, -1).copy(), heap_i.reshape(1, -1).copy()
+    )
+    write(
+        "kdtree",
+        "heap_push_deheap_sort",
+        "exact",
+        {"k": k, "pushes": pushes},
+        {
+            "push_returns": push_returns,
+            "heap_priorities": [float(v) for v in heap_after_p],
+            "heap_indices": [int(v) for v in heap_after_i],
+            "sorted_priorities": [float(v) for v in sorted_p[0]],
+            "sorted_indices": [int(v) for v in sorted_i[0]],
+        },
+    )
+
+    # --- parallel_tree_query ---
+    data, leaf_size = datasets["n100_d4_leaf10"]
+    tree = build_kdtree(data, leaf_size=leaf_size)
+    queries = np.vstack([data[:10], rng.normal(size=(5, 4)).astype(np.float32)]).astype(
+        np.float32
+    )
+    for output_rdist in (True, False):
+        dists, inds = parallel_tree_query(tree, queries, np.int64(5), output_rdist)
+        write(
+            "kdtree",
+            f"parallel_tree_query_k5_rdist_{str(output_rdist).lower()}",
+            {"default": "exact", "fields": {"distances": {"rel": 1e-4, "abs": 1e-6}}},
+            {
+                "dataset": "build_n100_d4_leaf10 (same data/leaf_size fixture)",
+                "data": data.tolist(),
+                "leaf_size": leaf_size,
+                "queries": queries.tolist(),
+                "k": 5,
+                "output_rdist": output_rdist,
+            },
+            {"distances": dists.tolist(), "indices": inds.tolist()},
+        )
+
+
 GENERATORS = {
     "rng": gen_rng,
     "disjoint_set": gen_disjoint_set,
     "distance": gen_distance,
+    "kdtree": gen_kdtree,
 }
 
 
