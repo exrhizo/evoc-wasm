@@ -8,10 +8,10 @@ Legend: ✅ done · 🚧 in progress · — not started
 | 1     | rng (tau_rand)       | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 1     | distance kernels     | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 2     | kdtree               | ✅       | ✅        | ✅         | ✅       | ✅        |
-| 3     | nnd_heap             | ✅       | —         | —          | —        | —         |
-| 3     | nndescent_float      | ✅       | —         | —          | —        | —         |
-| 4     | knn_graph            | —        | —         | —          | —        | —         |
-| 4     | graph_construction   | —        | —         | —          | —        | —         |
+| 3     | nnd_heap             | ✅       | ✅        | ✅         | ✅       | ✅        |
+| 3     | nndescent_float      | ✅       | ✅        | ✅         | ✅       | ✅        |
+| 4     | knn_graph            | ✅       | —         | —          | —        | —         |
+| 4     | graph_construction   | ✅       | —         | —          | —        | —         |
 | 5     | boruvka              | —        | —         | —          | —        | —         |
 | 6     | cluster_trees        | —        | —         | —          | —        | —         |
 | 7     | label_propagation    | —        | —         | —          | —        | —         |
