@@ -13,3 +13,4 @@ pub mod nndescent_float;
 pub mod knn_graph;
 pub mod graph_construction;
 pub mod boruvka;
+pub mod cluster_trees;
