@@ -4,3 +4,6 @@
 //! at the repository root for the porting contract and module map.
 
 // Modules are added phase by phase; keep this list in PORTING.md order.
+pub mod disjoint_set;
+pub mod rng;
+pub mod distance;
