@@ -318,11 +318,164 @@ def gen_kdtree():
         )
 
 
+def _unit_rows(rng, n, d):
+    data = rng.normal(size=(n, d)).astype(np.float32)
+    data /= np.linalg.norm(data, axis=1, keepdims=True).astype(np.float32)
+    return data.astype(np.float32)
+
+
+def gen_nndescent():
+    from evoc.common_nndescent import make_heap, flagged_heap_push, build_candidates
+    from evoc.float_nndescent import (
+        make_float_forest,
+        nn_descent_float,
+        nn_descent_float_sorted,
+    )
+
+    rng = np.random.RandomState(4242)
+
+    # --- flagged_heap_push on a single heap row ---
+    k = 7
+    heap_i, heap_p, heap_f = make_heap(1, k)
+    pi, pp, pf = heap_i[0], heap_p[0], heap_f[0]
+    pushes = []
+    returns = []
+    for m in range(20):
+        p = float(np.float32(rng.uniform(0.0, 5.0)))
+        n_val = int(rng.randint(0, 15))
+        pushes.append({"p": p, "n": n_val})
+        returns.append(int(flagged_heap_push(pp, pi, pf, np.float32(p), np.int32(n_val))))
+    write(
+        "nndescent",
+        "flagged_heap_push",
+        "exact",
+        {"k": k, "pushes": pushes,
+         "note": "fresh make_heap row (indices -1, priorities inf, flags 0); "
+                 "apply pushes in order, record each return"},
+        {
+            "push_returns": returns,
+            "heap_priorities": [float(v) for v in pp],
+            "heap_indices": [int(v) for v in pi],
+            "heap_flags": [int(v) for v in pf],
+        },
+    )
+
+    # --- build_candidates ---
+    n_points, k = 30, 8
+    graph_i, graph_p, graph_f = make_heap(n_points, k)
+    for i in range(n_points):
+        for _ in range(k + 4):
+            j = int(rng.randint(0, n_points))
+            if j == i:
+                continue
+            d = float(np.float32(rng.uniform(0.1, 2.0)))
+            flagged_heap_push(
+                graph_p[i], graph_i[i], graph_f[i], np.float32(d), np.int32(j)
+            )
+    in_graph = {
+        "indices": graph_i.tolist(),
+        "priorities": [[float(v) for v in row] for row in graph_p],
+        "flags": graph_f.tolist(),
+    }
+    rng_state = np.array([12345, 67890, 13579], dtype=np.int64)
+    max_candidates = 6
+    result = build_candidates(
+        (graph_i, graph_p, graph_f), np.int64(max_candidates), rng_state, 1
+    )
+    new_cand, old_cand = result[0], result[1]
+    write(
+        "nndescent",
+        "build_candidates",
+        "exact",
+        {
+            "current_graph": in_graph,
+            "max_candidates": max_candidates,
+            "rng_state": [12345, 67890, 13579],
+            "n_threads": 1,
+            "note": "current_graph arrays are the direct inputs (reconstruct, don't re-push); "
+                    "build_candidates may mutate graph flags — graph_flags_after is expected too",
+        },
+        {
+            "new_candidate_indices": new_cand.tolist(),
+            "old_candidate_indices": old_cand.tolist(),
+            "graph_flags_after": graph_f.tolist(),
+            "rng_state_after": [int(v) for v in rng_state],
+        },
+    )
+
+    # --- make_float_forest (2 trees, serial path) ---
+    data = _unit_rows(rng, 64, 6)
+    rng_states = np.array([[111, 222, 333], [444, 555, 666]], dtype=np.int64)
+    forest = make_float_forest(data, rng_states.copy(), 10, 200)
+    write(
+        "nndescent",
+        "make_float_forest_n64_d6_leaf10",
+        "exact",
+        {
+            "data": data.tolist(),
+            "rng_states": rng_states.tolist(),
+            "leaf_size": 10,
+            "max_depth": 200,
+        },
+        {"leaf_arrays": [la.tolist() for la in forest]},
+    )
+
+    # --- nn_descent_float / nn_descent_float_sorted ---
+    # leaf_array is a required input in practice (the None default is unusable:
+    # it is passed straight into init_rp_tree_float). Build one via the forest
+    # and record it verbatim — the ports take leaf_array as an input.
+    data = _unit_rows(rng, 150, 8)
+    nnd_rng_states = np.array([[111, 222, 333], [444, 555, 666]], dtype=np.int64)
+    nnd_forest = make_float_forest(data, nnd_rng_states.copy(), 10, 200)
+    max_leaf = max(la.shape[1] for la in nnd_forest)
+    leaf_array = np.vstack(
+        [
+            np.pad(la, ((0, 0), (0, max_leaf - la.shape[1])), constant_values=-1)
+            for la in nnd_forest
+        ]
+    )
+    for name, fn in [
+        ("nn_descent_float", nn_descent_float),
+        ("nn_descent_float_sorted", nn_descent_float_sorted),
+    ]:
+        st = np.array([987654321, 192837465, 1029384756], dtype=np.int64)
+        inds, dists = fn(
+            data,
+            10,
+            st,
+            max_candidates=12,
+            n_iters=6,
+            delta=0.001,
+            delta_improv=None,
+            leaf_array=leaf_array,
+            verbose=False,
+        )
+        write(
+            "nndescent",
+            f"{name}_n150_d8_k10",
+            {"default": "exact", "fields": {"distances": {"rel": 1e-4, "abs": 1e-6}}},
+            {
+                "data": data.tolist(),
+                "n_neighbors": 10,
+                "rng_state": [987654321, 192837465, 1029384756],
+                "max_candidates": 12,
+                "n_iters": 6,
+                "delta": 0.001,
+                "delta_improv": None,
+                "leaf_array": leaf_array.tolist(),
+                "note": "raw nn_descent output: distances are negative cosine similarity, "
+                        "BEFORE the knn_graph wrapper's -log2 transform",
+            },
+            {"indices": inds.tolist(), "distances": dists.tolist()},
+        )
+
+
 GENERATORS = {
     "rng": gen_rng,
     "disjoint_set": gen_disjoint_set,
     "distance": gen_distance,
     "kdtree": gen_kdtree,
+    "nndescent": gen_nndescent,
 }
 
 
