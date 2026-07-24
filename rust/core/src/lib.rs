@@ -16,3 +16,5 @@ pub mod boruvka;
 pub mod cluster_trees;
 pub mod node_embedding;
 pub mod label_propagation;
+pub mod clustering_utilities;
+pub mod clustering;

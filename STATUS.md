@@ -16,8 +16,8 @@ Legend: ✅ done · 🚧 in progress · — not started
 | 6     | cluster_trees        | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 7     | label_propagation    | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 7     | node_embedding       | ✅       | ✅        | ✅         | ✅       | ✅        |
-| 8     | clustering_utilities | —        | —         | —          | —        | —         |
-| 8     | clustering           | —        | —         | —          | —        | —         |
+| 8     | clustering_utilities | ✅       | ✅        | ✅         | —        | —         |
+| 8     | clustering           | ✅       | ✅        | ✅         | —        | —         |
 | 9     | wasm bindings + npm  | n/a      | —         | —          | —        | —         |
 | later | nndescent_int8       | —        | —         | —          | —        | —         |
 | later | nndescent_uint8      | —        | —         | —          | —        | —         |
@@ -26,9 +26,24 @@ Legend: ✅ done · 🚧 in progress · — not started
 
 - cluster_trees.py epsilon-search + cut family (`mask_condensed_tree`,
   `cluster_epsilon_search`, `traverse_upwards`, `segments_in_branch`,
-  `in_set_parallel`, `get_cluster_labelling_at_cut`): no phase-6 fixture
-  exercises these. Rust ported them (unverified); Zig deferred. Phase 8 must
-  fixture + verify them in both languages (used by `build_cluster_layers` and
-  `binary_search_for_n_clusters`).
+  `in_set_parallel`, `get_cluster_labelling_at_cut`): **Rust resolved in
+  phase 8.** No JSON fixture exercises `cluster_epsilon_search` /
+  `traverse_upwards` / `segments_in_branch` / `in_set_parallel` /
+  `get_cluster_labelling_at_cut` directly -- tracing the full upstream
+  `evoc` package confirms these four are dead code with zero call sites
+  anywhere outside `cluster_trees.py` itself, so no fixture will ever cover
+  them. Verified instead with hand-computed ground truth (an independent,
+  non-numba plain-numpy reimplementation run locally against synthetic
+  cluster trees; see the unit tests in `rust/core/src/cluster_trees.rs`'s
+  `#[cfg(test)] mod tests`, "Deferred epsilon-search / cut family" section).
+  `mask_condensed_tree` (the one function from this family with a real call
+  site, in `clustering.py`'s `build_cluster_layers`) is additionally
+  verified end-to-end via the `clustering::build_cluster_layers_n126`
+  fixture test. Zig still deferred.
+- `clustering.py`'s `build_cluster_layers` `base_n_clusters is not None`
+  branch has no fixture coverage (ported by composing already-fixtured
+  pieces per PORT_NOTES.md, not independently verified end-to-end).
+- `evoc_clusters()` / `EVoC.fit_predict()` remain explicitly out of scope
+  (sklearn PCA internals, not portable) -- see PORT_NOTES.md.
 
 Comparison results: see `comparison/results.md` (phase 10).

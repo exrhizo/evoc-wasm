@@ -22,19 +22,75 @@ pub fn fixtures_dir() -> PathBuf {
 ///
 /// Python's `json` module emits non-standard bare `Infinity` / `-Infinity`
 /// / `NaN` tokens which serde_json rejects; they are rewritten to quoted
-/// strings here and mapped back to floats by [`num_f64`]. (Fixture string
-/// values never contain these bare words, so plain substitution is safe.)
+/// strings here and mapped back to floats by [`num_f64`]. This is
+/// quote-aware (tracks JSON string state character by character) so that
+/// human-written `note` fields that happen to *contain* the word "NaN" (as
+/// prose, e.g. "returns 0.0, not NaN") are left untouched instead of being
+/// corrupted into invalid JSON by a blind text substitution.
 pub fn load(component: &str, case: &str) -> serde_json::Value {
     let path = fixtures_dir().join(component).join(format!("{case}.json"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read fixture {}: {}", path.display(), e));
-    let text = text
-        .replace("-Infinity", "\u{1}NEGINF\u{1}")
-        .replace("Infinity", "\"Infinity\"")
-        .replace("\u{1}NEGINF\u{1}", "\"-Infinity\"")
-        .replace("NaN", "\"NaN\"");
+    let text = rewrite_bare_specials(&text);
     serde_json::from_str(&text)
         .unwrap_or_else(|e| panic!("failed to parse fixture {}: {}", path.display(), e))
+}
+
+/// Replace bare `-Infinity` / `Infinity` / `NaN` tokens with their quoted
+/// JSON-string equivalents, but only outside of JSON string literals (so
+/// prose in `note` fields containing those words is untouched).
+fn rewrite_bare_specials(text: &str) -> String {
+    const TOKENS: [(&str, &str); 3] = [
+        ("-Infinity", "\"-Infinity\""),
+        ("Infinity", "\"Infinity\""),
+        ("NaN", "\"NaN\""),
+    ];
+
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if in_string {
+            out.push(c);
+            if c == '\\' && i + 1 < bytes.len() {
+                // Copy the escaped character verbatim too, so an escaped
+                // quote (`\"`) doesn't toggle string state.
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        let mut matched = false;
+        for (token, replacement) in TOKENS.iter() {
+            if text[i..].starts_with(token) {
+                out.push_str(replacement);
+                i += token.len();
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            out.push(c);
+            i += 1;
+        }
+    }
+
+    out
 }
 
 /// Parse a fixture number that may be a plain JSON number or one of the

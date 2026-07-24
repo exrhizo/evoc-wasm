@@ -840,4 +840,92 @@ mod tests {
         assert_eq!(cut.child, vec![4]);
         assert_eq!(cut.child_size, vec![3]);
     }
+
+    // ---------------------------------------------------------------------
+    // Deferred epsilon-search / cut family. No phase-6/8 JSON fixture
+    // exercises these directly (cluster_epsilon_search / traverse_upwards /
+    // segments_in_branch / in_set_parallel / get_cluster_labelling_at_cut are
+    // dead code with zero call sites anywhere in the upstream reference
+    // package outside cluster_trees.py itself; mask_condensed_tree IS used,
+    // by clustering.py's build_cluster_layers, and is covered end-to-end by
+    // the clustering::build_cluster_layers_n126 fixture test). Ground truth
+    // below was independently computed by re-implementing each function
+    // verbatim in plain numpy (no numba) and running it -- see
+    // scratchpad/verify_ct.py / verify_cut.py used during porting.
+
+    fn synthetic_cluster_tree() -> CondensedTree {
+        // root = 5; 5 -> 6 (eps 1.0), 5 -> 7 (eps 1.0); 6 -> 8 (eps 0.25),
+        // 6 -> 9 (eps 0.5).
+        CondensedTree {
+            parent: vec![5, 5, 6, 6],
+            child: vec![6, 7, 8, 9],
+            lambda_val: vec![1.0, 1.0, 4.0, 2.0],
+            child_size: vec![3, 2, 2, 1],
+        }
+    }
+
+    #[test]
+    fn mask_condensed_tree_filters_rows() {
+        let ct = synthetic_cluster_tree();
+        let mask: Vec<bool> = ct.child.iter().map(|&c| c >= 7).collect();
+        let masked = mask_condensed_tree(&ct, &mask);
+        assert_eq!(masked.parent, vec![5, 6, 6]);
+        assert_eq!(masked.child, vec![7, 8, 9]);
+        assert_eq!(masked.lambda_val, vec![1.0, 4.0, 2.0]);
+        assert_eq!(masked.child_size, vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn traverse_upwards_climbs_to_first_qualifying_ancestor() {
+        let ct = synthetic_cluster_tree();
+        // parent(8) = 6, eps(6) = 1/1.0 = 1.0 >= 0.3 -> returns 6 directly.
+        assert_eq!(traverse_upwards(&ct, 0.3, 5, 8), 6);
+    }
+
+    #[test]
+    fn segments_in_branch_collects_whole_subtree() {
+        let ct = synthetic_cluster_tree();
+        let mut got: Vec<i64> = segments_in_branch(&ct, 6).into_iter().collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![6, 8, 9]);
+    }
+
+    #[test]
+    fn in_set_parallel_membership() {
+        let ct = synthetic_cluster_tree();
+        let targets: HashSet<i64> = [5i64, 6].into_iter().collect();
+        assert_eq!(in_set_parallel(&ct.parent, &targets), vec![true, true, true, true]);
+    }
+
+    #[test]
+    fn cluster_epsilon_search_merges_low_persistence_segments() {
+        let ct = synthetic_cluster_tree();
+        // cluster 8: eps=0.25 < 0.3 -> traverse_upwards -> 6, mark {6,8,9} processed.
+        // cluster 9: eps=0.5, not < 0.3 -> appended directly (branch order is
+        // per-cluster, not gated by `processed` outside the eps<threshold arm).
+        // cluster 7: eps=1.0, not < 0.3 -> appended directly.
+        let result = cluster_epsilon_search(&[8, 9, 7], &ct, 0.3);
+        assert_eq!(result, vec![6, 9, 7]);
+    }
+
+    #[test]
+    fn get_cluster_labelling_at_cut_basic() {
+        // 5 points, 4 linkage rows: (left,right,delta,size).
+        let lt = LinkageTree {
+            rows: vec![
+                [0.0, 1.0, 1.0, 2.0],
+                [2.0, 3.0, 1.0, 2.0],
+                [5.0, 6.0, 2.0, 4.0],
+                [7.0, 4.0, 3.0, 5.0],
+            ],
+        };
+        assert_eq!(
+            get_cluster_labelling_at_cut(&lt, 1.5, 2),
+            vec![0, 0, 1, 1, -1]
+        );
+        assert_eq!(
+            get_cluster_labelling_at_cut(&lt, 2.5, 1),
+            vec![0, 0, 0, 0, 1]
+        );
+    }
 }

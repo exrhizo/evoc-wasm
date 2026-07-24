@@ -159,3 +159,19 @@ fn labels_and_strengths_n80_mcs5() {
         strength_tol.assert_close(a, e, &format!("strengths[{i}]"));
     }
 }
+
+// NOTE: `clustering_utilities/condense_tree_seed45.json` was evaluated as a
+// possible additional end-to-end check for `mask_condensed_tree` (built via
+// a real kdtree -> boruvka -> mst_to_linkage_tree -> condense_tree
+// pipeline), but this n=118 dataset's MST contains edges with exactly equal
+// distances (6 tied adjacent pairs after sorting). `sorted_mst = edges[np.argsort(edges.T[2])]`
+// in the reference uses numpy's default `kind="quicksort"`, which is NOT
+// stable, so which of several equal-distance edges sorts first is an
+// artifact of one specific numpy execution, not a reproducible algorithm --
+// replicating it bit-for-bit would require matching numpy's internal
+// introsort implementation, not the documented algorithm. This is a
+// pre-existing boruvka/sort-order concern orthogonal to the deferred
+// cut-family functions this phase covers; `mask_condensed_tree` itself is
+// still verified directly (see the unit test above) and end-to-end via the
+// required `clustering::build_cluster_layers_n126` fixture (whose MST has
+// no such ties), so this dataset is intentionally left untested here.
