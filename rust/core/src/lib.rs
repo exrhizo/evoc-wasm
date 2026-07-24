@@ -14,3 +14,5 @@ pub mod knn_graph;
 pub mod graph_construction;
 pub mod boruvka;
 pub mod cluster_trees;
+pub mod node_embedding;
+pub mod label_propagation;
