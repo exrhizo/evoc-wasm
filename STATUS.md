@@ -13,7 +13,7 @@ Legend: ✅ done · 🚧 in progress · — not started
 | 4     | knn_graph            | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 4     | graph_construction   | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 5     | boruvka              | ✅       | ✅        | ✅         | ✅       | ✅        |
-| 6     | cluster_trees        | ✅       | —         | —          | —        | —         |
+| 6     | cluster_trees        | ✅       | ✅        | ✅         | ✅       | ✅        |
 | 7     | label_propagation    | —        | —         | —          | —        | —         |
 | 7     | node_embedding       | —        | —         | —          | —        | —         |
 | 8     | clustering_utilities | —        | —         | —          | —        | —         |
@@ -21,5 +21,14 @@ Legend: ✅ done · 🚧 in progress · — not started
 | 9     | wasm bindings + npm  | n/a      | —         | —          | —        | —         |
 | later | nndescent_int8       | —        | —         | —          | —        | —         |
 | later | nndescent_uint8      | —        | —         | —          | —        | —         |
+
+## Deferred / gaps
+
+- cluster_trees.py epsilon-search + cut family (`mask_condensed_tree`,
+  `cluster_epsilon_search`, `traverse_upwards`, `segments_in_branch`,
+  `in_set_parallel`, `get_cluster_labelling_at_cut`): no phase-6 fixture
+  exercises these. Rust ported them (unverified); Zig deferred. Phase 8 must
+  fixture + verify them in both languages (used by `build_cluster_layers` and
+  `binary_search_for_n_clusters`).
 
 Comparison results: see `comparison/results.md` (phase 10).
