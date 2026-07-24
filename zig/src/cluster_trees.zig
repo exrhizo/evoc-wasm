@@ -758,6 +758,236 @@ pub fn get_point_membership_strength_vector(
 }
 
 // ---------------------------------------------------------------------------
+// Deferred: epsilon-search / cut family (mask_condensed_tree,
+// cluster_epsilon_search, traverse_upwards, segments_in_branch,
+// in_set_parallel, get_cluster_labelling_at_cut). No phase-6 fixture
+// exercises these directly; they are used internally by
+// build_cluster_layers/binary_search_for_n_clusters (phase 8) and covered
+// there transitively, plus dedicated unit tests below.
+// ---------------------------------------------------------------------------
+
+/// Port of mask_condensed_tree: boolean-mask row selection over a
+/// CondensedTree's four parallel arrays. Caller supplies whatever mask it
+/// needs (e.g. `child >= n_samples`, a different mask from
+/// `cluster_tree_from_condensed_tree`'s `child_size > 1`).
+pub fn mask_condensed_tree(allocator: Allocator, tree: *const CondensedTree, mask: []const bool) !CondensedTree {
+    std.debug.assert(mask.len == tree.parent.len);
+    var count: usize = 0;
+    for (mask) |m| {
+        if (m) count += 1;
+    }
+    const parent = try allocator.alloc(i64, count);
+    errdefer allocator.free(parent);
+    const child = try allocator.alloc(i64, count);
+    errdefer allocator.free(child);
+    const lambda_val = try allocator.alloc(f32, count);
+    errdefer allocator.free(lambda_val);
+    const child_size = try allocator.alloc(i64, count);
+    errdefer allocator.free(child_size);
+
+    var w: usize = 0;
+    for (0..tree.parent.len) |i| {
+        if (mask[i]) {
+            parent[w] = tree.parent[i];
+            child[w] = tree.child[i];
+            lambda_val[w] = tree.lambda_val[i];
+            child_size[w] = tree.child_size[i];
+            w += 1;
+        }
+    }
+    return CondensedTree{ .parent = parent, .child = child, .lambda_val = lambda_val, .child_size = child_size, .allocator = allocator };
+}
+
+/// Port of traverse_upwards (recursive). Finds the ancestor of `segment`
+/// (walking towards `root`) whose own epsilon (1/lambda at the point it was
+/// created as a child) is >= min_persistence, or `root` itself if none is
+/// found before reaching it.
+pub fn traverse_upwards(cluster_tree: *const CondensedTree, min_persistence: f32, root: i64, segment: i64) i64 {
+    var parent: i64 = 0;
+    for (0..cluster_tree.child.len) |i| {
+        if (cluster_tree.child[i] == segment) {
+            parent = cluster_tree.parent[i];
+            break;
+        }
+    }
+    if (parent == root) return root;
+
+    var parent_lambda: f32 = 0;
+    for (0..cluster_tree.child.len) |i| {
+        if (cluster_tree.child[i] == parent) {
+            parent_lambda = cluster_tree.lambda_val[i];
+            break;
+        }
+    }
+    const parent_eps = 1.0 / parent_lambda;
+    if (parent_eps >= min_persistence) {
+        return parent;
+    } else {
+        return traverse_upwards(cluster_tree, min_persistence, root, parent);
+    }
+}
+
+/// Port of in_set_parallel: element-wise membership test (sequential; the
+/// reference's numba.prange is purely a parallelization strategy, no
+/// cross-element dependency).
+pub fn in_set_parallel(allocator: Allocator, values: []const i64, targets: *const std.AutoHashMap(i64, void)) ![]bool {
+    const mask = try allocator.alloc(bool, values.len);
+    for (values, 0..) |v, i| mask[i] = targets.contains(v);
+    return mask;
+}
+
+/// Port of segments_in_branch. Returns the set of node ids in `segment`'s
+/// branch (itself plus all descendants), as an owned hashmap.
+pub fn segments_in_branch_set(allocator: Allocator, cluster_tree: *const CondensedTree, segment: i64) !std.AutoHashMap(i64, void) {
+    var result = std.AutoHashMap(i64, void).init(allocator);
+    errdefer result.deinit();
+
+    var to_process = std.AutoHashMap(i64, void).init(allocator);
+    defer to_process.deinit();
+    try to_process.put(segment, {});
+
+    while (to_process.count() > 0) {
+        var it = to_process.keyIterator();
+        while (it.next()) |k| try result.put(k.*, {});
+
+        const mask = try in_set_parallel(allocator, cluster_tree.parent, &to_process);
+        defer allocator.free(mask);
+
+        var next = std.AutoHashMap(i64, void).init(allocator);
+        for (mask, 0..) |m, i| {
+            if (m) try next.put(cluster_tree.child[i], {});
+        }
+        to_process.deinit();
+        to_process = next;
+    }
+    return result;
+}
+
+/// Port of cluster_epsilon_search. `clusters` are cluster-tree node ids
+/// selected by some upstream extraction (e.g. extract_eom_clusters);
+/// clusters whose epsilon (1/lambda at the point they were created) is below
+/// `min_persistence` get merged upward to the first ancestor whose epsilon
+/// clears the threshold (or to the tree root).
+pub fn cluster_epsilon_search(
+    allocator: Allocator,
+    clusters: []const i64,
+    cluster_tree: *const CondensedTree,
+    min_persistence: f32,
+) ![]i64 {
+    var selected = std.ArrayList(i64).init(allocator);
+    defer selected.deinit();
+
+    var processed = std.AutoHashMap(i64, void).init(allocator);
+    defer processed.deinit();
+
+    var root: i64 = cluster_tree.parent[0];
+    for (cluster_tree.parent) |p| {
+        if (p < root) root = p;
+    }
+
+    for (clusters) |cluster| {
+        var lambda_val: f32 = 0;
+        for (0..cluster_tree.child.len) |i| {
+            if (cluster_tree.child[i] == cluster) {
+                lambda_val = cluster_tree.lambda_val[i];
+                break;
+            }
+        }
+        const eps = 1.0 / lambda_val;
+        if (eps < min_persistence) {
+            if (!processed.contains(cluster)) {
+                const parent = traverse_upwards(cluster_tree, min_persistence, root, cluster);
+                try selected.append(parent);
+                var branch = try segments_in_branch_set(allocator, cluster_tree, parent);
+                defer branch.deinit();
+                var it = branch.keyIterator();
+                while (it.next()) |k| try processed.put(k.*, {});
+            }
+        } else {
+            try selected.append(cluster);
+        }
+    }
+    return selected.toOwnedSlice();
+}
+
+/// Port of get_cluster_labelling_at_cut. Cuts `linkage_tree` (columns
+/// left/right/delta, length n-1) at distance `cut`: components merged below
+/// `cut` are unioned, everything else stays separate; clusters smaller than
+/// `min_cluster_size` are relabeled -1 (noise). Returns per-point labels.
+pub fn get_cluster_labelling_at_cut(
+    allocator: Allocator,
+    linkage_left: []const f64,
+    linkage_right: []const f64,
+    linkage_delta: []const f64,
+    cut: f64,
+    min_cluster_size: i64,
+) ![]i64 {
+    const n_hier = linkage_left.len;
+    const root: i64 = @intCast(2 * n_hier);
+    const num_points: usize = n_hier + 1;
+
+    const result = try allocator.alloc(i64, num_points);
+    errdefer allocator.free(result);
+
+    var dset = try ds.ds_rank_create(allocator, @intCast(root + 1));
+    defer dset.deinit();
+
+    var cluster: i64 = @intCast(num_points);
+    for (0..n_hier) |i| {
+        if (linkage_delta[i] < cut) {
+            const cluster32: i32 = @intCast(cluster);
+            ds.ds_union_by_rank(&dset, @intCast(@as(i64, @intFromFloat(linkage_left[i]))), cluster32);
+            ds.ds_union_by_rank(&dset, @intCast(@as(i64, @intFromFloat(linkage_right[i]))), cluster32);
+        }
+        cluster += 1;
+    }
+
+    const cluster_size = try allocator.alloc(i64, @intCast(cluster));
+    defer allocator.free(cluster_size);
+    @memset(cluster_size, 0);
+    for (0..num_points) |n| {
+        const c = ds.ds_find(&dset, @intCast(n));
+        cluster_size[@intCast(c)] += 1;
+        result[n] = c;
+    }
+
+    // cluster_label_map = {-1: -1}; assign sequential labels to unique
+    // clusters (sorted ascending) with size >= min_cluster_size, else -1.
+    var unique_labels = std.ArrayList(i64).init(allocator);
+    defer unique_labels.deinit();
+    {
+        var seen = std.AutoHashMap(i64, void).init(allocator);
+        defer seen.deinit();
+        for (result) |c| {
+            if (!seen.contains(c)) {
+                try seen.put(c, {});
+                try unique_labels.append(c);
+            }
+        }
+    }
+    std.mem.sort(i64, unique_labels.items, {}, std.sort.asc(i64));
+
+    var cluster_label_map = std.AutoHashMap(i64, i64).init(allocator);
+    defer cluster_label_map.deinit();
+    try cluster_label_map.put(-1, -1);
+    var cluster_label: i64 = 0;
+    for (unique_labels.items) |c| {
+        if (cluster_size[@intCast(c)] < min_cluster_size) {
+            try cluster_label_map.put(c, -1);
+        } else {
+            try cluster_label_map.put(c, cluster_label);
+            cluster_label += 1;
+        }
+    }
+
+    for (result) |*r| {
+        r.* = cluster_label_map.get(r.*).?;
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1017,4 +1247,56 @@ test "fixture parity: extract_eom_clusters_n80_mcs5 (compare sorted)" {
     for (0..eom.len) |i| {
         try std.testing.expectEqual(@as(i64, exp_eom.items[i].integer), eom[i]);
     }
+}
+
+test "mask_condensed_tree: child_size > 1 mask matches cluster_tree_from_condensed_tree" {
+    const alloc = std.testing.allocator;
+    var tree = CondensedTree{
+        .parent = @constCast(&[_]i64{ 10, 10, 11, 11 }),
+        .child = @constCast(&[_]i64{ 11, 0, 1, 2 }),
+        .lambda_val = @constCast(&[_]f32{ 1.0, 2.0, 3.0, 4.0 }),
+        .child_size = @constCast(&[_]i64{ 3, 1, 1, 1 }),
+        .allocator = alloc,
+    };
+    const mask = [_]bool{ true, false, false, false };
+    var masked = try mask_condensed_tree(alloc, &tree, &mask);
+    defer masked.deinit();
+    try std.testing.expectEqual(@as(usize, 1), masked.parent.len);
+    try std.testing.expectEqual(@as(i64, 10), masked.parent[0]);
+    try std.testing.expectEqual(@as(i64, 11), masked.child[0]);
+}
+
+test "cluster_epsilon_search: cluster above threshold passes through unchanged" {
+    const alloc = std.testing.allocator;
+    // Root 10 -> children 11 (lambda 1.0, eps 1.0), 12 (lambda 0.1, eps 10.0).
+    var cluster_tree = CondensedTree{
+        .parent = @constCast(&[_]i64{ 10, 10 }),
+        .child = @constCast(&[_]i64{ 11, 12 }),
+        .lambda_val = @constCast(&[_]f32{ 1.0, 0.1 }),
+        .child_size = @constCast(&[_]i64{ 5, 5 }),
+        .allocator = alloc,
+    };
+    const clusters = [_]i64{ 11, 12 };
+    // min_persistence=5.0: cluster 11 (eps 1.0 < 5.0) merges upward to root (10);
+    // cluster 12 (eps 10.0 >= 5.0) passes through.
+    const result = try cluster_epsilon_search(alloc, &clusters, &cluster_tree, 5.0);
+    defer alloc.free(result);
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqual(@as(i64, 10), result[0]);
+    try std.testing.expectEqual(@as(i64, 12), result[1]);
+}
+
+test "get_cluster_labelling_at_cut: single merge below cut forms one cluster" {
+    const alloc = std.testing.allocator;
+    // 3 points, linkage: row0 merges 0,1 at delta 1.0 (size 2); row1 merges
+    // 2 with node 3 at delta 5.0 (size 3).
+    const left = [_]f64{ 1, 3 };
+    const right = [_]f64{ 0, 2 };
+    const delta = [_]f64{ 1.0, 5.0 };
+    // cut=2.0: only row0 (delta 1.0 < 2.0) merges; row1 stays split.
+    const labels = try get_cluster_labelling_at_cut(alloc, &left, &right, &delta, 2.0, 1);
+    defer alloc.free(labels);
+    try std.testing.expectEqual(@as(usize, 3), labels.len);
+    try std.testing.expectEqual(labels[0], labels[1]);
+    try std.testing.expect(labels[2] != labels[0]);
 }

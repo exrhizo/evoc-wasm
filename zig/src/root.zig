@@ -16,6 +16,8 @@ pub const boruvka = @import("boruvka.zig");
 pub const cluster_trees = @import("cluster_trees.zig");
 pub const label_propagation = @import("label_propagation.zig");
 pub const node_embedding = @import("node_embedding.zig");
+pub const clustering_utilities = @import("clustering_utilities.zig");
+pub const clustering = @import("clustering.zig");
 
 // Test-only fixture-loading helper (not part of the freestanding surface).
 const fixture = @import("fixture.zig");
