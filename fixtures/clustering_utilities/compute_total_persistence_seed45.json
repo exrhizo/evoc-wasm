@@ -1,0 +1,84 @@
+{
+ "component": "clustering_utilities",
+ "case": "compute_total_persistence_seed45",
+ "tolerance": {
+  "rel": 0.0001,
+  "abs": 1e-06
+ },
+ "inputs": {
+  "births": [
+   56.0,
+   25.0,
+   17.0,
+   11.0,
+   18.0,
+   16.0,
+   5.0,
+   5.0,
+   5.0,
+   5.0,
+   5.0,
+   8.0,
+   5.0,
+   5.0,
+   5.0
+  ],
+  "deaths": [
+   118.0,
+   56.0,
+   56.0,
+   25.0,
+   25.0,
+   17.0,
+   17.0,
+   11.0,
+   11.0,
+   18.0,
+   18.0,
+   16.0,
+   16.0,
+   8.0,
+   8.0
+  ],
+  "lambda_deaths": [
+   0.0,
+   1.5746962573391414e-37,
+   1.5746962573391414e-37,
+   1.48936841970499e-19,
+   1.48936841970499e-19,
+   7.091523457347648e-08,
+   7.091523457347648e-08,
+   4.752981049103294e-14,
+   4.752981049103294e-14,
+   6.540559525092249e-07,
+   6.540559525092249e-07,
+   0.00011915928917005658,
+   0.00011915928917005658,
+   0.0001241701829712838,
+   0.0001241701829712838
+  ],
+  "note": "births/deaths/lambda_deaths are min_cluster_size_barcode_seed45's size_births/size_deaths/lambda_deaths outputs verbatim. sizes = np.unique(births) (sorted, deduped). Loop starts at i=1 (index 0, the root's (0-birth, n_points-death) entry, is SKIPPED intentionally -- 'maintain left-open (birth, death] interval'). Both birth_idx/death_idx searches are LINEAR scans for the first sizes[j] >= birth/death (not true binary search despite the comment -- replicate as a linear scan, first-match-wins, not an actual bisection); death_idx defaults to len(sizes) if no match (death exceeds the largest known size). Entries with death <= birth are skipped entirely (continue)."
+ },
+ "expected": {
+  "sizes": [
+   5.0,
+   8.0,
+   11.0,
+   16.0,
+   17.0,
+   18.0,
+   25.0,
+   56.0
+  ],
+  "total_persistence": [
+   0.0020736297592520714,
+   0.002281883032992482,
+   0.002281883032992482,
+   1.792735383787658e-05,
+   1.7005455447360873e-05,
+   3.127673707229873e-18,
+   1.1022873980740193e-35,
+   0.0
+  ]
+ }
+}

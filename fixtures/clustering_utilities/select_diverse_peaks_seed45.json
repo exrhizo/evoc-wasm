@@ -1,0 +1,72 @@
+{
+ "component": "clustering_utilities",
+ "case": "select_diverse_peaks_seed45",
+ "tolerance": "exact",
+ "inputs": {
+  "peaks": [
+   1
+  ],
+  "total_persistence": [
+   0.0020736297592520714,
+   0.002281883032992482,
+   0.002281883032992482,
+   1.792735383787658e-05,
+   1.7005455447360873e-05,
+   3.127673707229873e-18,
+   1.1022873980740193e-35,
+   0.0
+  ],
+  "sizes": [
+   5.0,
+   8.0,
+   11.0,
+   16.0,
+   17.0,
+   18.0,
+   25.0,
+   56.0
+  ],
+  "births": [
+   56.0,
+   25.0,
+   17.0,
+   11.0,
+   18.0,
+   16.0,
+   5.0,
+   5.0,
+   5.0,
+   5.0,
+   5.0,
+   8.0,
+   5.0,
+   5.0,
+   5.0
+  ],
+  "deaths": [
+   118.0,
+   56.0,
+   56.0,
+   25.0,
+   25.0,
+   17.0,
+   17.0,
+   11.0,
+   11.0,
+   18.0,
+   18.0,
+   16.0,
+   16.0,
+   8.0,
+   8.0
+  ],
+  "min_similarity_threshold": 0.2,
+  "max_layers": 9,
+  "note": "peaks = find_peaks(total_persistence) from the compute_total_persistence_seed45 fixture (this dataset yields exactly one real peak, at index 1 into sizes/total_persistence -- a small but genuine multi-layer case; the phase-6 n80 tree's persistence curve is monotone and yields ZERO peaks, so it can't exercise this function meaningfully). Peaks sorted by persistence descending (np.argsort(...)[::-1] -- ties broken by argsort's stable order, i.e. original ascending-index order among equal values). For each candidate peak in that order: compute jaccard-based estimate_cluster_similarity against every ALREADY-selected peak's birth size; reject (skip) if similarity > threshold for ANY already-selected peak, else accept. Stops early once max_layers peaks are selected."
+ },
+ "expected": {
+  "selected_peak_indices": [
+   1
+  ]
+ }
+}

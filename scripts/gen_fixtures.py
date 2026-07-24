@@ -896,6 +896,1364 @@ def gen_cluster_trees():
     )
 
 
+def _load_n120_graph():
+    """Shared 120-node symmetrized graph, reused by label_propagation and
+    node_embedding fixtures. Built exactly as gen_graph's neighbor_graph_matrix
+    case does, from the committed knn_graph_n120_d8_k10_seed42 fixture."""
+    from evoc.graph_construction import neighbor_graph_matrix
+
+    nnd_path = os.path.join(FIXTURES_DIR, "graph", "knn_graph_n120_d8_k10_seed42.json")
+    with open(nnd_path) as f:
+        fx = json.load(f)
+    knn_inds = np.array(fx["expected"]["nn_inds"], dtype=np.int32)
+    knn_dists = np.array(fx["expected"]["nn_dists"], dtype=np.float32)
+    n_neighbors = fx["inputs"]["n_neighbors"]
+    graph = neighbor_graph_matrix(1.0 * n_neighbors, knn_inds, knn_dists, symmetrize=True)
+    csr = graph.tocsr()
+    csr.sort_indices()
+    return csr
+
+
+class _TracedRS(np.random.RandomState):
+    """np.random.RandomState subclass that records every randint/normal/shuffle
+    call and its result, in order. Used to make numpy-Mersenne-Twister-driven
+    reference code portable: ports cannot reproduce the MT stream itself, so we
+    record every value it produced and feed those values in as explicit fixture
+    inputs, in the same call order the reference consumes them."""
+
+    def __init__(self, seed):
+        super().__init__(seed)
+        self.trace = []
+
+    def randint(self, *a, **k):
+        r = super().randint(*a, **k)
+        self.trace.append(("randint", np.array(r).tolist()))
+        return r
+
+    def normal(self, *a, **k):
+        r = super().normal(*a, **k)
+        self.trace.append(("normal", np.array(r).tolist()))
+        return r
+
+    def shuffle(self, x):
+        super().shuffle(x)
+        self.trace.append(("shuffle", np.array(x).tolist()))
+        return None
+
+
+def gen_label_propagation():
+    from evoc.label_propagation import (
+        label_prop_iteration,
+        label_outliers,
+        remap_labels,
+        label_prop_loop,
+        label_propagation_init,
+    )
+    from sklearn.utils import check_random_state
+
+    csr = _load_n120_graph()
+    n = csr.shape[0]
+
+    # --- label_prop_iteration standalone ---
+    # Seed ~1/4 of nodes with labels drawn from a small pool (0..4) so multiple
+    # neighbors of an unlabeled node can cast votes for the SAME label
+    # (exercises the votes[l] += branch) and so ties are likely (exercises the
+    # tie_count / tau_rand tie-break branch and the current_l == -1 branch).
+    rng = np.random.RandomState(11)
+    labels0 = np.full(n, -1, dtype=np.int64)
+    seed_positions = rng.choice(n, size=n // 4, replace=False)
+    for i, pos in enumerate(seed_positions):
+        labels0[pos] = int(i % 5)
+    rng_state = np.array([555, 777, 999], dtype=np.int64)
+    result1 = label_prop_iteration(csr.indptr, csr.indices, csr.data, labels0, rng_state.copy())
+    write(
+        "label_propagation",
+        "label_prop_iteration_n120",
+        "exact",
+        {
+            "indptr": [int(x) for x in csr.indptr],
+            "indices": [int(x) for x in csr.indices],
+            "data": [float(x) for x in csr.data],
+            "labels": [int(x) for x in labels0],
+            "rng_state": [int(x) for x in rng_state],
+            "note": "labels0: ~n/4 of nodes seeded with labels drawn from a pool of "
+                    "5 distinct label values (i % 5), rest -1. This creates real vote "
+                    "competition and label collisions among a labeled node's "
+                    "neighbors, exercising votes[l] accumulation and the tie_count "
+                    "/ tau_rand(local_rng_state) < 1/tie_count tie-break branch. "
+                    "local_rng_state = rng_state + i (elementwise, a FRESH array per "
+                    "row i, not an advancing shared state) -- tau_rand mutates that "
+                    "local copy in place per row; rows are independent RNG streams.",
+        },
+        {"labels": [int(x) for x in result1]},
+    )
+
+    # --- label_outliers standalone ---
+    # Build a labels vector with a chain of unresolved nodes so the BFS queue in
+    # label_outliers actually walks more than one hop, plus at least one node
+    # guaranteed to fall through to the tau_rand_int random-assignment branch
+    # (n_iter >= 64 or unlabelled) by disconnecting it entirely (self-loop-only
+    # row via indptr slicing is invasive; instead we accept whatever the real
+    # graph's connectivity gives us and record the branch outcome as ground
+    # truth -- the graph is connected so this exercises the BFS-success branch;
+    # the random-assignment branch is covered by construction in the synthetic
+    # case below).
+    labels_partial = result1.copy()
+    rng_state2 = np.array([222, 333, 444], dtype=np.int64)
+    result2 = label_outliers(csr.indptr, csr.indices, labels_partial.copy(), rng_state2.copy())
+    write(
+        "label_propagation",
+        "label_outliers_n120",
+        "exact",
+        {
+            "indptr": [int(x) for x in csr.indptr],
+            "indices": [int(x) for x in csr.indices],
+            "labels": [int(x) for x in labels_partial],
+            "rng_state": [int(x) for x in rng_state2],
+            "note": "labels_partial is label_prop_iteration_n120's output (still has "
+                    "unresolved -1 entries). local_rng_state = rng_state + i per row, "
+                    "same convention as label_prop_iteration. Graph is connected so "
+                    "every -1 node resolves via BFS within 64 hops in this fixture "
+                    "(the tau_rand_int fallback branch is NOT exercised here -- see "
+                    "label_outliers_disconnected for that).",
+        },
+        {"labels": [int(x) for x in result2]},
+    )
+
+    # --- label_outliers: disconnected-node fallback branch ---
+    # A tiny graph where node 0 has no edges at all: node_queue starts as [0],
+    # the for-loop over indptr[0]:indptr[1] (empty range) never executes, so
+    # `unlabelled` stays True and n_iter never increments past 0 -- falls
+    # through to the tau_rand_int(local_rng_state) % (max_label + 1) branch.
+    iso_indptr = np.array([0, 0, 2, 4], dtype=np.int64)
+    iso_indices = np.array([2, 1, 1, 2], dtype=np.int32)
+    iso_data = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+    iso_labels = np.array([-1, 0, 1], dtype=np.int64)
+    iso_rng_state = np.array([42, 84, 126], dtype=np.int64)
+    iso_result = label_outliers(iso_indptr, iso_indices, iso_labels.copy(), iso_rng_state.copy())
+    write(
+        "label_propagation",
+        "label_outliers_disconnected",
+        "exact",
+        {
+            "indptr": [int(x) for x in iso_indptr],
+            "indices": [int(x) for x in iso_indices],
+            "labels": [int(x) for x in iso_labels],
+            "rng_state": [int(x) for x in iso_rng_state],
+            "note": "node 0 has zero edges (indptr[0]==indptr[1]==0), so its BFS "
+                    "node_queue=[0] pops with no neighbors, unlabelled stays True, "
+                    "and it falls through to labels[0] = tau_rand_int(rng_state+0) "
+                    "% (max_label+1). max_label = labels.max() computed BEFORE the "
+                    "loop (== 1 here, from the initial labels array, not updated "
+                    "labels), so modulus is 2 regardless of what other nodes resolve to.",
+        },
+        {"labels": [int(x) for x in iso_result]},
+    )
+
+    # --- remap_labels standalone ---
+    # Mix of already-nonnegative (possibly non-contiguous) labels and -1 entries
+    # to exercise both the mapping[] compaction and the next_label assignment
+    # for unresolved nodes.
+    remap_input = np.array([5, -1, 5, 2, -1, 2, 9, -1], dtype=np.int64)
+    remap_result = remap_labels(remap_input.copy())
+    write(
+        "label_propagation",
+        "remap_labels",
+        "exact",
+        {
+            "labels": [int(x) for x in remap_input],
+            "note": "unique non-negative labels {2,5,9} remap to {0,1,2} in sorted "
+                    "order (np.unique); each remaining -1 gets a FRESH successive "
+                    "label starting at next_label = len(unique_labels) -- i.e. -1 "
+                    "entries do NOT collapse to a single label, each becomes its "
+                    "own new singleton cluster, assigned in array-index order.",
+        },
+        {"labels": [int(x) for x in remap_result]},
+    )
+
+    # --- label_prop_loop end to end (numpy MT seeding draws recorded) ---
+    rs = _TracedRS(321)
+    labels_init = np.full(n, -1, dtype=np.int64)
+    approx_n_parts = 16
+    n_iter = 5
+    partition = label_prop_loop(
+        csr.indptr, csr.indices, csr.data, labels_init, rs, n_iter=n_iter, approx_n_parts=approx_n_parts
+    )
+    assert rs.trace[0][0] == "randint" and len(rs.trace[0][1]) == 3
+    rng_state_drawn = rs.trace[0][1]
+    seed_draws = [t[1] for t in rs.trace[1:] if t[0] == "randint"][:approx_n_parts]
+    write(
+        "label_propagation",
+        "label_prop_loop_n120",
+        "exact",
+        {
+            "indptr": [int(x) for x in csr.indptr],
+            "indices": [int(x) for x in csr.indices],
+            "data": [float(x) for x in csr.data],
+            "n_points": n,
+            "n_iter": n_iter,
+            "approx_n_parts": approx_n_parts,
+            "rng_state": rng_state_drawn,
+            "seed_position_draws": seed_draws,
+            "note": "label_prop_loop draws from a numpy RandomState (NOT portable "
+                    "bit-for-bit); this fixture records every draw it makes in order "
+                    "so ports can replay deterministically without numpy's Mersenne "
+                    "Twister. Draw order: (1) rng_state = "
+                    "random_state.randint(INT32_MIN, INT32_MAX, 3) once -- this "
+                    "becomes the FIXED array fed (by reference/copy, per-row offset) "
+                    "into every label_prop_iteration/label_outliers call for the rest "
+                    "of the loop; (2) approx_n_parts calls to "
+                    "random_state.randint(labels.shape[0]) -- each draws ONE seed "
+                    "position, and labels[pos] = i is set immediately (i = draw "
+                    "index, 0-based) -- collisions (same position drawn twice) are "
+                    "possible and simply overwrite. After seeding: n_iter calls to "
+                    "label_prop_iteration (feeding forward each iteration's output "
+                    "as the next iteration's input labels), then ONE label_outliers "
+                    "call, then remap_labels. rng_state itself is never redrawn "
+                    "during the iterations -- it is reused as-is (only the +i row "
+                    "offset varies per node inside each numba kernel call).",
+        },
+        {"partition": [int(x) for x in partition]},
+    )
+
+    # --- label_propagation_init end to end ---
+    # graph.shape[0]=120 >= base_init_threshold=64, so this takes the
+    # label_prop_loop + node_embedding upscaling path (not the small-graph PCA
+    # base case). recursive_init=False so there is exactly ONE level of
+    # label_prop_loop + ONE node_embedding call on the reduced graph -- this
+    # keeps the RNG trace flat and fully recordable (recursive_init=True would
+    # recurse into ANOTHER label_propagation_init call, multiplying draws and,
+    # below base_init_threshold, invoking sklearn PCA(random_state=...) which
+    # draws from the RandomState in an sklearn/scipy-internal, effectively
+    # unportable way -- avoid that path entirely for fixtures).
+    n_components = 4
+    n_label_prop_iter = 5
+    n_embedding_epochs = 5
+    approx_n_parts2 = 16
+    rs2 = _TracedRS(321)
+    emb = label_propagation_init(
+        csr,
+        n_label_prop_iter=n_label_prop_iter,
+        n_embedding_epochs=n_embedding_epochs,
+        approx_n_parts=approx_n_parts2,
+        n_components=n_components,
+        scaling=0.1,
+        random_scale=1.0,
+        noise_level=0.5,
+        random_state=rs2,
+        data=None,
+        recursive_init=False,
+        base_init="pca",
+        base_init_threshold=64,
+        upscaling="partition_expander",
+    )
+    # Determinism check: an independent replay from a fresh seed-321 RandomState
+    # must reproduce the same embedding bit-for-bit (numba kernels + single
+    # thread + the same MT draw sequence => deterministic).
+    rs2b = check_random_state(321)
+    emb_b = label_propagation_init(
+        csr,
+        n_label_prop_iter=n_label_prop_iter,
+        n_embedding_epochs=n_embedding_epochs,
+        approx_n_parts=approx_n_parts2,
+        n_components=n_components,
+        scaling=0.1,
+        random_scale=1.0,
+        noise_level=0.5,
+        random_state=rs2b,
+        data=None,
+        recursive_init=False,
+        base_init="pca",
+        base_init_threshold=64,
+        upscaling="partition_expander",
+    )
+    assert np.array_equal(emb, emb_b), "label_propagation_init is not deterministic for a fixed seed"
+
+    # Unpack the trace into the named draws ports need, in call order:
+    # 0: rng_state (3 int64, label_prop_loop's internal RNG state)
+    # 1..approx_n_parts2: seed position draws (label_prop_loop's partition seeding)
+    # next: normal draw = node_embedding's own initial_embedding (since
+    #   label_propagation_init passes initial_embedding=None on the recursive_init=False
+    #   path, so node_embedding draws its own init from the SAME advancing random_state)
+    # next: randint draw = node_embedding's rng_val (one uint32-range int per epoch)
+    # next n_embedding_epochs: shuffle draws = node_embedding's per-epoch node_order shuffles
+    idx = 0
+    assert rs2.trace[idx][0] == "randint"
+    lp_rng_state = rs2.trace[idx][1]
+    idx += 1
+    seed_draws2 = []
+    for _ in range(approx_n_parts2):
+        assert rs2.trace[idx][0] == "randint"
+        seed_draws2.append(rs2.trace[idx][1])
+        idx += 1
+    assert rs2.trace[idx][0] == "normal"
+    ne_init_normal = rs2.trace[idx][1]
+    idx += 1
+    assert rs2.trace[idx][0] == "randint"
+    ne_rng_val = rs2.trace[idx][1]
+    idx += 1
+    ne_shuffles = []
+    for _ in range(n_embedding_epochs):
+        assert rs2.trace[idx][0] == "shuffle"
+        ne_shuffles.append(rs2.trace[idx][1])
+        idx += 1
+    assert idx == len(rs2.trace), "unexpected trailing RNG draws in label_propagation_init trace"
+
+    write(
+        "label_propagation",
+        "label_propagation_init_n120",
+        {"rel": 1e-4, "abs": 1e-6},
+        {
+            "indptr": [int(x) for x in csr.indptr],
+            "indices": [int(x) for x in csr.indices],
+            "data": [float(x) for x in csr.data],
+            "n_points": n,
+            "n_label_prop_iter": n_label_prop_iter,
+            "n_embedding_epochs": n_embedding_epochs,
+            "approx_n_parts": approx_n_parts2,
+            "n_components": n_components,
+            "scaling": 0.1,
+            "random_scale": 1.0,
+            "noise_level": 0.5,
+            "recursive_init": False,
+            "base_init_threshold": 64,
+            "upscaling": "partition_expander",
+            "lp_rng_state": lp_rng_state,
+            "lp_seed_position_draws": seed_draws2,
+            "node_embedding_init_normal": ne_init_normal,
+            "node_embedding_rng_val": ne_rng_val,
+            "node_embedding_shuffles": ne_shuffles,
+            "note": "graph is the shared 120-node fixture (>= base_init_threshold=64) "
+                    "so this takes the label_prop_loop + node_embedding-upscaling "
+                    "path, NOT the small-graph PCA/random/spectral/mds base case. "
+                    "recursive_init=False keeps this to a single non-recursive level "
+                    "(no nested label_propagation_init / no sklearn PCA call). "
+                    "label_propagation_init does NOT draw from tau_rand/rng_state "
+                    "itself for its own logic -- ALL its randomness is either (a) "
+                    "delegated to label_prop_loop (which draws lp_rng_state + "
+                    "lp_seed_position_draws from the passed numpy RandomState, then "
+                    "uses tau_rand internally with that FIXED rng_state array) or "
+                    "(b) delegated to node_embedding (called with "
+                    "initial_embedding=None on this path, so node_embedding draws "
+                    "its OWN init from the same advancing RandomState -- see "
+                    "node_embedding_init_normal/rng_val/shuffles below). Draw order "
+                    "recorded here is exactly the call order: lp_rng_state (1x3 "
+                    "int64), lp_seed_position_draws (approx_n_parts scalars, one per "
+                    "label_prop_loop seeding iteration), node_embedding_init_normal "
+                    "(reduced_graph.shape[0] x n_components floats -- reduced_graph "
+                    "is the label-propagation-partitioned graph, NOT the input "
+                    "graph; its size is data-dependent, read its shape off this "
+                    "array), node_embedding_rng_val (n_embedding_epochs ints, one "
+                    "per SGD epoch), node_embedding_shuffles (n_embedding_epochs "
+                    "permutation arrays of node_order, applied one per epoch AFTER "
+                    "that epoch's SGD update, each of length reduced_graph.shape[0]). "
+                    "Feed lp_rng_state/lp_seed_position_draws into a replay of "
+                    "label_prop_loop's body (label_prop_iteration x n_iter, then "
+                    "ONE label_outliers, then remap_labels -- see "
+                    "label_prop_loop_n120 fixture for that in isolation), then build "
+                    "the reduced graph exactly as label_propagation_init does "
+                    "(base_reduction_map / normalized_reduction_map / reduced_graph "
+                    "= normalized_reduction_map.T @ graph @ base_reduction_map, "
+                    "clipped to [0,1]), then feed node_embedding_init_normal as "
+                    "node_embedding's initial_embedding and "
+                    "node_embedding_rng_val[n]/node_embedding_shuffles[n] as its "
+                    "per-epoch RNG source (see node_embedding fixtures for exact "
+                    "epoch semantics), then finish with the partition_expander "
+                    "upscaling algebra (no further randomness) to get the final "
+                    "n_points x n_components embedding. Determinism was verified: "
+                    "an independent RandomState(321) replay of the WHOLE function "
+                    "reproduces this embedding bit-for-bit.",
+        },
+        {"embedding": emb.tolist()},
+    )
+
+
+def gen_node_embedding():
+    from evoc.node_embedding import (
+        make_epochs_per_sample,
+        rdist,
+        clip,
+        node_embedding_epoch,
+        node_embedding_epoch_repr,
+        node_embedding,
+    )
+    from sklearn.utils import check_random_state
+
+    csr = _load_n120_graph()
+    n = csr.shape[0]
+
+    # --- make_epochs_per_sample standalone ---
+    for n_epochs in (10, 50):
+        eps = make_epochs_per_sample(csr.data, n_epochs)
+        write(
+            "node_embedding",
+            f"make_epochs_per_sample_n_epochs{n_epochs}",
+            {"rel": 1e-5},
+            {
+                "weights": [float(x) for x in csr.data],
+                "n_epochs": n_epochs,
+                "note": "weights is the shared 120-node graph's csr.data (edge "
+                        "weights). result = n_epochs / max(n_epochs * (weights / "
+                        "weights.max()), 1.0), computed in f32; the max(..., 1.0) "
+                        "floor means edges far below the max weight get exactly "
+                        "n_epochs as their epochs_per_sample (never sampled more "
+                        "than once every n_epochs epochs).",
+            },
+            {"epochs_per_sample": [float(x) for x in eps]},
+        )
+
+    # --- rdist / clip standalone ---
+    rng = np.random.RandomState(3)
+    rdist_pairs = []
+    for dim in (4, 6, 16):
+        x = rng.normal(size=dim).astype(np.float32)
+        y = rng.normal(size=dim).astype(np.float32)
+        rdist_pairs.append((x, y))
+    rdist_pairs.append((rdist_pairs[0][0], rdist_pairs[0][0]))  # identical -> 0
+    write(
+        "node_embedding",
+        "rdist",
+        {"rel": 1e-5, "abs": 1e-7},
+        {"pairs": [{"x": x.tolist(), "y": y.tolist()} for x, y in rdist_pairs]},
+        {"values": [float(rdist(x, y)) for x, y in rdist_pairs]},
+    )
+
+    clip_cases = [
+        {"val": 5.0, "lo": -4.0, "hi": 4.0},
+        {"val": -5.0, "lo": -4.0, "hi": 4.0},
+        {"val": 1.0, "lo": -4.0, "hi": 4.0},
+        {"val": 4.0, "lo": -4.0, "hi": 4.0},   # boundary: val == hi
+        {"val": -4.0, "lo": -4.0, "hi": 4.0},  # boundary: val == lo
+    ]
+    write(
+        "node_embedding",
+        "clip",
+        "exact",
+        {"cases": clip_cases},
+        {
+            "values": [
+                float(clip(np.float32(c["val"]), np.float32(c["lo"]), np.float32(c["hi"])))
+                for c in clip_cases
+            ]
+        },
+    )
+
+    # --- node_embedding_epoch_repr: ONE epoch, isolated ---
+    # reproducible_flag=True is the path clustering.py actually uses (evoc_clusters
+    # calls node_embedding with its default reproducible_flag=True); this fixture
+    # targets THAT kernel, not the plain node_embedding_epoch (see the note below
+    # for the distinction). epoch_of_next_sample / epoch_of_next_negative_sample
+    # are recorded as all-ZERO (rather than initialized to epochs_per_sample /
+    # epochs_per_negative_sample as node_embedding would on epoch 0) so that
+    # EVERY sample's `epoch_of_next_sample[i] <= n` gate fires on this single
+    # call -- with the natural epoch-0 schedule almost nothing fires (schedules
+    # start at >=1), which would under-exercise the inner SGD loop. This isolates
+    # exactly the update math + negative-sampling index arithmetic for one pass.
+    n_components = 5
+    rng2 = np.random.RandomState(9)
+    embedding = rng2.normal(scale=0.25, size=(n, n_components)).astype(np.float32, order="C")
+    epochs_per_sample = make_epochs_per_sample(csr.data, 10).astype(np.float32, order="C")
+    negative_sample_rate = 1.0
+    epochs_per_negative_sample = (epochs_per_sample / negative_sample_rate) * 1.5  # reproducible_flag=True
+    epoch_of_next_negative_sample = np.zeros_like(epochs_per_negative_sample)
+    epoch_of_next_sample = np.zeros_like(epochs_per_sample)
+    csr_indptr = csr.indptr.astype(np.uint32)
+    csr_indices = csr.indices.astype(np.uint32)
+    updates = np.zeros_like(embedding)
+    node_order = np.arange(n, dtype=np.uint32)
+    embedding_before = embedding.copy()
+    rng_state_scalar = 123456
+    gamma = 1.0
+    alpha = 0.1
+    block_size = 4096
+    node_embedding_epoch_repr(
+        embedding,
+        csr_indptr,
+        csr_indices,
+        np.uint32(n),
+        epochs_per_sample,
+        np.uint32(rng_state_scalar),
+        n_components,
+        np.float32(alpha),
+        epochs_per_negative_sample,
+        epoch_of_next_negative_sample,
+        epoch_of_next_sample,
+        np.uint8(0),
+        np.float32(0.5),
+        gamma,
+        updates,
+        node_order,
+        np.uint32(block_size),
+    )
+    write(
+        "node_embedding",
+        "node_embedding_epoch_repr_single_epoch_n120",
+        {"rel": 1e-4, "abs": 1e-6},
+        {
+            "embedding_before": embedding_before.tolist(),
+            "csr_indptr": [int(x) for x in csr_indptr],
+            "csr_indices": [int(x) for x in csr_indices],
+            "n_vertices": n,
+            "epochs_per_sample": [float(x) for x in epochs_per_sample],
+            "rng_state": rng_state_scalar,
+            "dim": n_components,
+            "alpha": alpha,
+            "epochs_per_negative_sample": [float(x) for x in epochs_per_negative_sample],
+            "epoch_of_next_negative_sample": [float(x) for x in epoch_of_next_negative_sample],
+            "epoch_of_next_sample": [float(x) for x in epoch_of_next_sample],
+            "n": 0,
+            "noise_level": 0.5,
+            "gamma": gamma,
+            "node_order": [int(x) for x in node_order],
+            "block_size": block_size,
+            "note": "This is node_embedding_epoch_repr (the reproducible_flag=True "
+                    "kernel that clustering.py's node_embedding(..., "
+                    "reproducible_flag=True) actually calls -- NOT the plain "
+                    "node_embedding_epoch, which is only used when "
+                    "reproducible_flag=False). epoch_of_next_sample and "
+                    "epoch_of_next_negative_sample are deliberately recorded as "
+                    "all-zero (NOT the natural epoch-0 values, which are >=1 and "
+                    "would mean almost nothing fires) so every edge's positive "
+                    "update AND negative-sampling loop fire on this single call -- "
+                    "this isolates the per-edge SGD math from the outer epoch-loop "
+                    "scheduling. rng_state here is a single scalar (uint32), NOT a "
+                    "tau_rand advancing 3-int64 state -- negative sample target "
+                    "index is `node_order[(raw_index * (n + p + 1) * rng_state) % "
+                    "n_vertices]`, pure integer arithmetic, no RNG state mutation. "
+                    "updates[] accumulates positive+negative gradient contributions "
+                    "per from_node across the WHOLE block before being added into "
+                    "embedding at the end of the block (node_embedding itself then "
+                    "scales updates by (1-alpha)^2*0.5 AFTER this call and carries "
+                    "it to the next epoch -- that carry-over is NOT part of this "
+                    "kernel and is out of scope for this fixture). Expected "
+                    "embedding_after already has updates applied (this kernel "
+                    "applies them internally, in its last per-block loop) -- do NOT "
+                    "separately add updates_after to embedding_before.",
+        },
+        {
+            "embedding_after": embedding.tolist(),
+            "updates_after": updates.tolist(),
+            "epoch_of_next_sample_after": [float(x) for x in epoch_of_next_sample],
+            "epoch_of_next_negative_sample_after": [float(x) for x in epoch_of_next_negative_sample],
+        },
+    )
+
+    # --- node_embedding_epoch (non-reproducible kernel), ONE epoch, isolated ---
+    # Included for completeness / in case a port wants the simpler non-blocked
+    # kernel, but note clustering.py never calls this path with the default
+    # reproducible_flag=True.
+    embedding3 = rng2.normal(scale=0.25, size=(n, n_components)).astype(np.float32, order="C")
+    coo = csr.tocoo()
+    head = coo.row.astype(np.uint32)
+    tail = coo.col.astype(np.uint32)
+    eps3 = make_epochs_per_sample(csr.data, 10).astype(np.float32, order="C")
+    epns3 = eps3 / negative_sample_rate  # reproducible_flag=False path: no *1.5
+    eons3 = np.zeros_like(epns3)
+    eos3 = np.zeros_like(eps3)
+    embedding3_before = embedding3.copy()
+    rng_state_scalar3 = 654321
+    node_embedding_epoch(
+        embedding3, head, tail, np.uint32(n), eps3, rng_state_scalar3,
+        n_components, np.float32(0.1), epns3, eons3, eos3, 0, np.float32(0.5),
+    )
+    write(
+        "node_embedding",
+        "node_embedding_epoch_single_epoch_n120",
+        {"rel": 1e-4, "abs": 1e-6},
+        {
+            "embedding_before": embedding3_before.tolist(),
+            "head": [int(x) for x in head],
+            "tail": [int(x) for x in tail],
+            "n_vertices": n,
+            "epochs_per_sample": [float(x) for x in eps3],
+            "rng_state": rng_state_scalar3,
+            "dim": n_components,
+            "alpha": 0.1,
+            "epochs_per_negative_sample": [float(x) for x in epns3],
+            "epoch_of_next_negative_sample": [float(x) for x in eons3],
+            "epoch_of_next_sample": [float(x) for x in eos3],
+            "n": 0,
+            "noise_level": 0.5,
+            "note": "node_embedding_epoch is the reproducible_flag=False kernel: "
+                    "it takes COO (head, tail) edge lists rather than CSR + "
+                    "node_order/updates/blocking, and updates `embedding` DIRECTLY "
+                    "in place per-edge (no deferred updates[] accumulator, no "
+                    "gamma_schedule term in the negative-sample grad_coeff, and "
+                    "epochs_per_negative_sample has no *1.5 reproducibility "
+                    "inflation). clustering.py's default reproducible_flag=True "
+                    "never exercises this kernel -- fixture it anyway for "
+                    "completeness/parity coverage. epoch_of_next_sample / "
+                    "epoch_of_next_negative_sample zeroed for the same reason as "
+                    "the _repr fixture (force every sample to fire on this call).",
+        },
+        {"embedding_after": embedding3.tolist()},
+    )
+
+    # --- node_embedding end-to-end (reproducible_flag=True, the path clustering.py uses) ---
+    n_components_e2e = 5
+    n_epochs_e2e = 10
+    rng3 = np.random.RandomState(202)
+    init_embedding = rng3.normal(scale=0.25, size=(n, n_components_e2e)).astype(np.float32, order="C")
+
+    rs = _TracedRS(303)
+    final_embedding = node_embedding(
+        csr,
+        n_components_e2e,
+        n_epochs_e2e,
+        initial_embedding=init_embedding.copy(),
+        initial_alpha=0.1,
+        negative_sample_rate=1.0,
+        noise_level=0.5,
+        random_state=rs,
+        reproducible_flag=True,
+        verbose=False,
+    )
+    # Determinism check against an independent fresh-seed replay.
+    rs_b = check_random_state(303)
+    final_embedding_b = node_embedding(
+        csr,
+        n_components_e2e,
+        n_epochs_e2e,
+        initial_embedding=init_embedding.copy(),
+        initial_alpha=0.1,
+        negative_sample_rate=1.0,
+        noise_level=0.5,
+        random_state=rs_b,
+        reproducible_flag=True,
+        verbose=False,
+    )
+    assert np.array_equal(final_embedding, final_embedding_b), "node_embedding is not deterministic for a fixed seed"
+
+    # Trace: since initial_embedding is provided, node_embedding does NOT draw its
+    # own init `normal` -- draw order is: rng_val (1x randint, size=n_epochs),
+    # then n_epochs shuffles (one per epoch, applied AFTER that epoch's SGD pass).
+    assert rs.trace[0][0] == "randint"
+    rng_val = rs.trace[0][1]
+    shuffles = [t[1] for t in rs.trace[1:] if t[0] == "shuffle"]
+    assert len(shuffles) == n_epochs_e2e
+    assert len(rs.trace) == 1 + n_epochs_e2e
+
+    write(
+        "node_embedding",
+        "node_embedding_e2e_n120",
+        {"rel": 1e-3, "abs": 1e-5},
+        {
+            "indptr": [int(x) for x in csr.indptr],
+            "indices": [int(x) for x in csr.indices],
+            "data": [float(x) for x in csr.data],
+            "n_vertices": n,
+            "n_components": n_components_e2e,
+            "n_epochs": n_epochs_e2e,
+            "initial_embedding": init_embedding.tolist(),
+            "initial_alpha": 0.1,
+            "negative_sample_rate": 1.0,
+            "noise_level": 0.5,
+            "reproducible_flag": True,
+            "rng_val": rng_val,
+            "node_order_shuffles": shuffles,
+            "note": "reproducible_flag=True is the ONLY path clustering.py's "
+                    "node_embedding() call uses (it never passes "
+                    "reproducible_flag=False); this end-to-end fixture targets "
+                    "node_embedding_epoch_repr exclusively, called once per epoch "
+                    "in a python for-loop (see node_embedding()'s source). Because "
+                    "initial_embedding is provided, node_embedding does NOT draw "
+                    "its own normal() init -- the FIRST RandomState draw is "
+                    "rng_val = random_state.randint(INT32_MAX, size=n_epochs), "
+                    "done ONCE up front, before the epoch loop. Inside the loop, "
+                    "epoch n's rng_state argument to node_embedding_epoch_repr is "
+                    "np.uint32(rng_val[n]) -- a single scalar per epoch, reused for "
+                    "every negative-sample draw within that epoch (see the "
+                    "single-epoch fixture note for the index arithmetic; there is "
+                    "no tau_rand advancing state anywhere in node_embedding). "
+                    "AFTER each epoch's node_embedding_epoch_repr call: `updates *= "
+                    "(1.0 - alpha) ** 2 * 0.5` (updates array persists/decays "
+                    "across epochs, it is NOT re-zeroed), then "
+                    "`random_state.shuffle(node_order)` (one shuffle per epoch, "
+                    "recorded in order in node_order_shuffles -- node_order starts "
+                    "as arange(n_vertices) before epoch 0 and is permuted in place "
+                    "by each shuffle), then `alpha = initial_alpha * (1 - n / "
+                    "n_epochs)` for the NEXT epoch (note: alpha for epoch n uses "
+                    "the value computed after epoch n-1; epoch 0 uses the raw "
+                    "initial_alpha unchanged). gamma_schedule = "
+                    "np.linspace(0.5, 1.5, n_epochs) (deterministic, no RNG; "
+                    "gamma_schedule[n] is epoch n's gamma argument -- recompute it, "
+                    "not recorded separately here). csr_indptr/csr_indices passed "
+                    "to the kernel are graph.indptr/graph.indices cast to uint32 "
+                    "(reconstruct from indptr/indices above). Determinism was "
+                    "verified: an independent RandomState(303) replay of the WHOLE "
+                    "function reproduces final_embedding bit-for-bit. Python "
+                    "tolerance is loose (fastmath accumulation over 10 epochs) but "
+                    "Rust and Zig MUST match each other bit-for-bit per PORTING.md.",
+        },
+        {"final_embedding": final_embedding.tolist()},
+    )
+
+
+def _hierarchical_blobs_seed45():
+    """A dataset with genuine two-level cluster structure (2-3 super-clusters,
+    each with 2-4 sub-clusters), chosen (by trying seeds) because it produces a
+    non-trivial condensed/cluster tree: min_cluster_size_barcode's persistence
+    curve has an actual interior local maximum, so find_peaks/select_diverse_peaks
+    are exercised non-trivially -- most simple blob configurations collapse to a
+    monotone persistence curve with zero peaks. Returns (data, n_samples,
+    condensed_tree, cluster_tree, sorted_mst) built via the real reference
+    pipeline (kdtree -> boruvka -> mst_to_linkage_tree -> condense_tree)."""
+    from evoc.numba_kdtree import build_kdtree
+    from evoc.boruvka import parallel_boruvka
+    from evoc.cluster_trees import mst_to_linkage_tree, condense_tree, mask_condensed_tree
+
+    rng = np.random.RandomState(45)
+    n_super = rng.randint(2, 4)
+    super_centers = rng.uniform(-50, 50, size=(n_super, 4))
+    data_list = []
+    for sc in super_centers:
+        n_sub = rng.randint(2, 5)
+        sub_centers = sc + rng.normal(scale=rng.uniform(3, 12), size=(n_sub, 4))
+        for subc in sub_centers:
+            npts = rng.randint(8, 20)
+            data_list.append(subc + rng.normal(scale=rng.uniform(0.3, 1.2), size=(npts, 4)))
+    data = np.vstack(data_list).astype(np.float32)
+    n_samples = data.shape[0]
+
+    numba_tree = build_kdtree(data.astype(np.float32))
+    edges = parallel_boruvka(numba_tree, np.int64(1), np.int64(5), True)
+    sorted_mst = edges[np.argsort(edges.T[2])].astype(np.float32)
+    uncondensed_tree = mst_to_linkage_tree(sorted_mst)
+    condensed_tree = condense_tree(uncondensed_tree, 5)
+    mask = condensed_tree.child >= n_samples
+    cluster_tree = mask_condensed_tree(condensed_tree, mask)
+    return data, n_samples, condensed_tree, cluster_tree, sorted_mst
+
+
+def _condensed_tree_to_json(ct):
+    return {
+        "parent": [int(v) for v in ct.parent],
+        "child": [int(v) for v in ct.child],
+        "lambda_val": [float(v) for v in ct.lambda_val],
+        "child_size": [int(v) for v in ct.child_size],
+    }
+
+
+def gen_clustering_utilities():
+    from evoc.numba_kdtree import build_kdtree
+    from evoc.boruvka import parallel_boruvka
+    from evoc.cluster_trees import CondensedTree, mst_to_linkage_tree, mask_condensed_tree
+    from evoc.clustering_utilities import (
+        find_peaks,
+        _binary_search_for_n_clusters,
+        binary_search_for_n_clusters,
+        min_cluster_size_barcode,
+        compute_total_persistence,
+        extract_clusters_by_id,
+        jaccard_similarity,
+        estimate_cluster_similarity,
+        select_diverse_peaks,
+        build_cluster_tree,
+        find_duplicates,
+    )
+
+    data, n_samples, condensed_tree, cluster_tree, sorted_mst = _hierarchical_blobs_seed45()
+
+    # Record the shared seed-45 dataset + its condensed_tree/cluster_tree once,
+    # as a reference fixture other cases in this module point back to by name
+    # (avoids repeating the full data/tree arrays in every fixture's inputs).
+    write(
+        "clustering_utilities",
+        "condense_tree_seed45",
+        {"default": "exact", "fields": {"lambda_val": {"rel": 1e-4, "abs": 1e-6}}},
+        {
+            "data": data.tolist(),
+            "n_samples": n_samples,
+            "note": "data is a 2-3-super-cluster / 2-4-sub-cluster-each hierarchical "
+                    "blobs dataset (RandomState(45); see _hierarchical_blobs_seed45 "
+                    "in gen_fixtures.py for the exact generation recipe -- pure "
+                    "numpy RandomState draws for cluster centers/sizes, no "
+                    "reference-library randomness involved, so it is exactly "
+                    "reproducible by re-running that recipe if needed, but the "
+                    "'data' array here is the portable ground truth). "
+                    "condensed_tree = condense_tree(mst_to_linkage_tree("
+                    "sorted_mst), min_cluster_size=5) where sorted_mst = "
+                    "parallel_boruvka(build_kdtree(data), n_threads=1, "
+                    "min_samples=5, reproducible=True) sorted by distance. "
+                    "cluster_tree = mask_condensed_tree(condensed_tree, "
+                    "condensed_tree.child >= n_samples) (internal-nodes-only "
+                    "view). Other fixtures in this module (min_cluster_size_barcode_seed45, "
+                    "compute_total_persistence_seed45, select_diverse_peaks_seed45, "
+                    "extract_clusters_by_id_seed45_*) reference this dataset by "
+                    "name instead of repeating 'data' -- this fixture is the "
+                    "portable source of truth for it.",
+        },
+        {
+            "condensed_tree": _condensed_tree_to_json(condensed_tree),
+            "cluster_tree": _condensed_tree_to_json(cluster_tree),
+        },
+    )
+
+    # --- find_peaks: synthetic 1-D signal with 3 clean interior peaks (incl. a
+    # plateau to exercise the i_ahead scan-past-ties logic) ---
+    x = np.array([0, 1, 3, 2, 1, 0, 2, 5, 3, 1, 0, 4, 4, 1], dtype=np.float64)
+    peaks_synth = find_peaks(x)
+    write(
+        "clustering_utilities",
+        "find_peaks_synthetic",
+        "exact",
+        {
+            "x": x.tolist(),
+            "note": "1-D signal with 3 local maxima at indices 2 (value 3), 7 "
+                    "(value 5), and 11 (value 4, a width-2 plateau at indices "
+                    "11-12 -- find_peaks's midpoint = (left_edge+right_edge)//2 "
+                    "picks the LEFT of the plateau pair). First/last samples can "
+                    "never be peaks by construction (i starts at 1, loop bound is "
+                    "x.shape[0]-1).",
+        },
+        {"peak_indices": [int(v) for v in peaks_synth]},
+    )
+    # No-peak / monotone case (also realistic: this is what the n80 phase-6 tree gives).
+    x_flat = np.array([5.0, 4.0, 3.0, 2.0, 1.0, 0.0], dtype=np.float64)
+    write(
+        "clustering_utilities",
+        "find_peaks_monotone_empty",
+        "exact",
+        {"x": x_flat.tolist(), "note": "strictly decreasing -- no interior local maximum, expect empty result."},
+        {"peak_indices": [int(v) for v in find_peaks(x_flat)]},
+    )
+
+    # --- min_cluster_size_barcode / compute_total_persistence / find_peaks (real tree) ---
+    min_cluster_size = 5
+    births, deaths, parents, lambda_deaths = min_cluster_size_barcode(cluster_tree, n_samples, min_cluster_size)
+    write(
+        "clustering_utilities",
+        "min_cluster_size_barcode_seed45",
+        {"rel": 1e-4, "abs": 1e-6},
+        {
+            "cluster_tree": _condensed_tree_to_json(cluster_tree),
+            "n_points": n_samples,
+            "min_size": min_cluster_size,
+            "note": "cluster_tree is mask_condensed_tree(condensed_tree, "
+                    "condensed_tree.child >= n_points) applied to condense_tree("
+                    "mst_to_linkage_tree(sorted_mst), min_cluster_size=5) built "
+                    "from a real hierarchical-blobs dataset (2-3 super-clusters "
+                    "each with 2-4 sub-clusters, RandomState(45) recipe -- see "
+                    "condense_tree_seed45 fixture for the full condensed_tree this "
+                    "was masked from, and the 'data' field there for the raw "
+                    "points). n_nodes = cluster_tree.child[-1] - n_points + 1. "
+                    "Iterates row-PAIRS in reverse (idx = n_rows-1, n_rows-3, ...) "
+                    "-- cluster_tree rows come in adjacent left/right sibling "
+                    "pairs from condense_tree's branch-split output; out_idx = "
+                    "cluster_tree.child[idx] - n_points indexes the RIGHT sibling "
+                    "of the pair, out_idx-1 the LEFT. lambda_deaths uses exp(-1/"
+                    "lambda_val) -- lambda_val is never 0 here (guaranteed by "
+                    "condense_tree's lambda=1/d convention), but guard for it if "
+                    "porting to a context where it could be.",
+        },
+        {
+            "size_births": [float(v) for v in births],
+            "size_deaths": [float(v) for v in deaths],
+            "parents": [int(v) for v in parents],
+            "lambda_deaths": [float(v) for v in lambda_deaths],
+        },
+    )
+
+    sizes, total_persistence = compute_total_persistence(births, deaths, lambda_deaths)
+    write(
+        "clustering_utilities",
+        "compute_total_persistence_seed45",
+        {"rel": 1e-4, "abs": 1e-6},
+        {
+            "births": [float(v) for v in births],
+            "deaths": [float(v) for v in deaths],
+            "lambda_deaths": [float(v) for v in lambda_deaths],
+            "note": "births/deaths/lambda_deaths are min_cluster_size_barcode_seed45's "
+                    "size_births/size_deaths/lambda_deaths outputs verbatim. sizes = "
+                    "np.unique(births) (sorted, deduped). Loop starts at i=1 "
+                    "(index 0, the root's (0-birth, n_points-death) entry, is "
+                    "SKIPPED intentionally -- 'maintain left-open (birth, death] "
+                    "interval'). Both birth_idx/death_idx searches are LINEAR "
+                    "scans for the first sizes[j] >= birth/death (not true binary "
+                    "search despite the comment -- replicate as a linear scan, "
+                    "first-match-wins, not an actual bisection); death_idx "
+                    "defaults to len(sizes) if no match (death exceeds the largest "
+                    "known size). Entries with death <= birth are skipped "
+                    "entirely (continue).",
+        },
+        {"sizes": [float(v) for v in sizes], "total_persistence": [float(v) for v in total_persistence]},
+    )
+
+    peaks = find_peaks(total_persistence)
+    selected_peaks = select_diverse_peaks(
+        peaks, total_persistence, sizes, births, deaths,
+        min_similarity_threshold=0.2, max_layers=9,
+    )
+    write(
+        "clustering_utilities",
+        "select_diverse_peaks_seed45",
+        "exact",
+        {
+            "peaks": [int(v) for v in peaks],
+            "total_persistence": [float(v) for v in total_persistence],
+            "sizes": [float(v) for v in sizes],
+            "births": [float(v) for v in births],
+            "deaths": [float(v) for v in deaths],
+            "min_similarity_threshold": 0.2,
+            "max_layers": 9,
+            "note": "peaks = find_peaks(total_persistence) from the "
+                    "compute_total_persistence_seed45 fixture (this dataset "
+                    "yields exactly one real peak, at index 1 into "
+                    "sizes/total_persistence -- a small but genuine multi-layer "
+                    "case; the phase-6 n80 tree's persistence curve is monotone "
+                    "and yields ZERO peaks, so it can't exercise this function "
+                    "meaningfully). Peaks sorted by persistence descending "
+                    "(np.argsort(...)[::-1] -- ties broken by argsort's stable "
+                    "order, i.e. original ascending-index order among equal "
+                    "values). For each candidate peak in that order: compute "
+                    "jaccard-based estimate_cluster_similarity against every "
+                    "ALREADY-selected peak's birth size; reject (skip) if "
+                    "similarity > threshold for ANY already-selected peak, else "
+                    "accept. Stops early once max_layers peaks are selected.",
+        },
+        {"selected_peak_indices": [int(v) for v in selected_peaks]},
+    )
+
+    # --- extract_clusters_by_id, using the selected peak(s) above ---
+    for peak in selected_peaks:
+        best_birth = sizes[peak]
+        selected_clusters = np.where((births <= best_birth) & (deaths > best_birth))[0] + n_samples
+        labels, strengths = extract_clusters_by_id(condensed_tree, selected_clusters)
+        write(
+            "clustering_utilities",
+            f"extract_clusters_by_id_seed45_peak{int(peak)}",
+            {"default": "exact", "fields": {"strengths": {"rel": 1e-4, "abs": 1e-6}}},
+            {
+                "condensed_tree": _condensed_tree_to_json(condensed_tree),
+                "selected_ids": [int(v) for v in selected_clusters],
+                "note": "condensed_tree is condense_tree(mst_to_linkage_tree("
+                        "sorted_mst), min_cluster_size=5) from the same seed-45 "
+                        "hierarchical-blobs dataset (full tree, NOT the "
+                        "child>=n_points-masked cluster_tree). selected_clusters = "
+                        "where((births<=best_birth) & (deaths>best_birth))[0] + "
+                        "n_samples, i.e. cluster NODE IDS (offset by n_samples "
+                        "since node ids >= n_samples are internal cluster nodes). "
+                        "extract_clusters_by_id = get_cluster_label_vector(tree, "
+                        "selected_ids, cluster_selection_epsilon=0.0, n_samples="
+                        "tree.parent[0]) + get_point_membership_strength_vector "
+                        "(already-ported in cluster_trees phase 6 -- this fixture "
+                        "just pins the selected_ids this call site actually "
+                        "produces).",
+            },
+            {"labels": [int(v) for v in labels], "strengths": [float(v) for v in strengths]},
+        )
+
+    # --- jaccard_similarity / estimate_cluster_similarity, standalone ---
+    jaccard_cases = [
+        {"a": [1, 2, 3], "b": [2, 3, 4]},
+        {"a": [1, 2, 3], "b": [1, 2, 3]},
+        {"a": [1, 2, 3], "b": [4, 5, 6]},
+        {"a": [], "b": []},
+        {"a": [7], "b": []},
+    ]
+    write(
+        "clustering_utilities",
+        "jaccard_similarity",
+        "exact",
+        {
+            "cases": jaccard_cases,
+            "note": "set_a_array/set_b_array are int64 arrays in the reference. "
+                    "Empty/empty -> union_count==0 -> returns 0.0 (not NaN, not "
+                    "an error). Order matters for the ALGORITHM (union_set starts "
+                    "as set(a), then b's items are folded in) but NOT for the "
+                    "final numeric result (jaccard is symmetric) -- still replicate "
+                    "the exact iteration for parity of any future extension.",
+        },
+        {
+            "values": [
+                float(jaccard_similarity(np.array(c["a"], dtype=np.int64), np.array(c["b"], dtype=np.int64)))
+                for c in jaccard_cases
+            ]
+        },
+    )
+
+    est_cases = [
+        {"birth_a": float(sizes[0]), "birth_b": float(sizes[-1])},
+        {"birth_a": float(sizes[0]), "birth_b": float(sizes[0])},
+    ]
+    write(
+        "clustering_utilities",
+        "estimate_cluster_similarity_seed45",
+        "exact",
+        {
+            "births": [float(v) for v in births],
+            "deaths": [float(v) for v in deaths],
+            "cases": est_cases,
+            "note": "births/deaths from min_cluster_size_barcode_seed45. For each "
+                    "case: clusters_a = indices i where births[i]<=birth_a AND "
+                    "deaths[i]>birth_a (half-open interval, matching "
+                    "compute_total_persistence's left-open/right-closed (birth, "
+                    "death] convention read backwards); same for clusters_b with "
+                    "birth_b. Result = jaccard_similarity(clusters_a, clusters_b) "
+                    "-- same birth_a/birth_b (2nd case) is NOT guaranteed to give "
+                    "similarity 1.0 in general (only if clusters_a's construction "
+                    "is deterministic given identical inputs, which it is here "
+                    "since both loops use the same arrays) so this case should "
+                    "come out as exactly 1.0.",
+        },
+        {
+            "values": [
+                float(estimate_cluster_similarity(births, deaths, np.float64(c["birth_a"]), np.float64(c["birth_b"])))
+                for c in est_cases
+            ]
+        },
+    )
+
+    # --- build_cluster_tree: small synthetic multi-layer label vectors ---
+    labels_layer0 = np.array([0, 0, 1, 1, 2, 2, -1, 3, 3], dtype=np.int64)
+    labels_layer1 = np.array([0, 0, 0, 0, 1, 1, -1, 1, 1], dtype=np.int64)
+    labels_layer2 = np.array([0, 0, 0, 0, 0, 0, -1, 0, 0], dtype=np.int64)
+    tree_dict = build_cluster_tree([labels_layer0, labels_layer1, labels_layer2])
+    # Serialize the dict deterministically: sorted (layer, cluster) keys, each
+    # value list also sorted (values are appended in a data-order-dependent
+    # sequence in the reference; sort for a canonical, order-independent fixture).
+    sorted_items = []
+    for key in sorted(tree_dict.keys()):
+        children = sorted(tree_dict[key])
+        sorted_items.append(
+            {
+                "parent_layer": int(key[0]),
+                "parent_cluster": int(key[1]),
+                "children": [[int(c[0]), int(c[1])] for c in children],
+            }
+        )
+    write(
+        "clustering_utilities",
+        "build_cluster_tree_3layers",
+        "exact",
+        {
+            "labels": [
+                [int(v) for v in labels_layer0],
+                [int(v) for v in labels_layer1],
+                [int(v) for v in labels_layer2],
+            ],
+            "note": "labels[0] is the FINEST (base) layer, labels[-1] the "
+                    "COARSEST; -1 entries are noise at that layer, excluded from "
+                    "the tree. _build_cluster_tree walks upper_layer from 1 "
+                    "upward, and for each upper_layer scans lower_layer from "
+                    "upper_layer-1 down to 0, grouping lower-layer labels by "
+                    "which upper-layer cluster they fall under (via argsort + "
+                    "np.split on bincount cumsum) and recording a (parent_layer, "
+                    "parent_label, child_layer, child_label) edge the FIRST time "
+                    "a given (child_layer, child_label) is seen (found[] set "
+                    "dedup, seeded with {-1} per layer so noise is never "
+                    "recorded). After that pass, any (layer, label) not yet found "
+                    "gets attached as a synthetic child of (len(labels), 0) -- "
+                    "a virtual root above the top layer. The reference's "
+                    "iteration order over dict/set is NOT guaranteed stable; "
+                    "this fixture's 'expected' is a CANONICALIZED form: a list "
+                    "sorted by (parent_layer, parent_cluster), each entry's "
+                    "children list sorted too. Compare as sets, not sequences.",
+        },
+        {"tree": sorted_items},
+    )
+
+    # --- find_duplicates: synthetic knn with genuine duplicate/near-duplicate structure ---
+    knn_inds = np.array(
+        [
+            [1, 2, 3],
+            [0, 2, 3],
+            [3, 0, 1],
+            [2, 0, 1],
+            [5, 6, 0],
+            [4, 6, 0],
+            [4, 5, 0],
+        ],
+        dtype=np.int32,
+    )
+    knn_dists = np.array(
+        [
+            [0.0, 0.5, 0.6],
+            [0.0, 0.4, 0.5],
+            [0.1, 0.5, 0.6],
+            [0.1, 0.5, 0.6],
+            [0.9, 0.95, 1.0],
+            [0.9, 0.92, 1.0],
+            [0.9, 0.92, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    dup = find_duplicates(knn_inds, knn_dists)
+    write(
+        "clustering_utilities",
+        "find_duplicates_synthetic",
+        "exact",
+        {
+            "knn_indices": knn_inds.tolist(),
+            "knn_dists": knn_dists.tolist(),
+            "note": "duplicate_distance = max(knn_dists[:, 0]) (the largest "
+                    "NEAREST-neighbor distance across all points, i.e. the "
+                    "reference's own worst-case 1st-neighbor distance sets the "
+                    "threshold for what counts as 'duplicate' EVERYWHERE -- a "
+                    "single noisy row inflates the threshold globally). For "
+                    "every (i, knn_indices[i,j]) pair with knn_dists[i,j] <= "
+                    "that threshold: canonicalize as (min(i,k), max(i,k)) and add "
+                    "to a set (dedups automatically); i==k (self-neighbor) pairs "
+                    "are explicitly skipped via the elif/else chain. Row 0/1 rows "
+                    "2/3 are mutually 0.0-or-0.1 distance (all pairwise "
+                    "duplicates); row 4/5/6 sit right at the 0.9 threshold "
+                    "(inclusive <=) so (4,5) qualifies but the 0.92/0.95 second "
+                    "neighbors do not.",
+        },
+        {"duplicate_pairs": sorted([[int(a), int(b)] for a, b in dup])},
+    )
+
+    # find_duplicates reusing a real nndescent fixture's knn output (0 duplicates
+    # expected -- real cosine-similarity distances rarely land at the exact max,
+    # this documents that as ground truth rather than forcing a positive case).
+    nnd_path = os.path.join(FIXTURES_DIR, "nndescent", "nn_descent_float_n150_d8_k10.json")
+    with open(nnd_path) as f:
+        nnd_fixture = json.load(f)
+    real_inds = np.array(nnd_fixture["expected"]["indices"], dtype=np.int32)
+    real_dists = np.array(nnd_fixture["expected"]["distances"], dtype=np.float32)
+    real_dup = find_duplicates(real_inds, real_dists)
+    write(
+        "clustering_utilities",
+        "find_duplicates_nndescent_n150",
+        "exact",
+        {
+            "source": "fixtures/nndescent/nn_descent_float_n150_d8_k10.json "
+                       "(expected.indices / expected.distances, raw negative-"
+                       "cosine-similarity distances, unmodified)",
+            "knn_indices": real_inds.tolist(),
+            "knn_dists": real_dists.tolist(),
+            "note": "Real nn_descent output on random unit vectors essentially "
+                    "never has exact near-duplicate points, so duplicate_pairs is "
+                    "empty here -- this is a legitimate ground-truth empty-set "
+                    "case, not a placeholder; see find_duplicates_synthetic for "
+                    "the non-trivial case.",
+        },
+        {"duplicate_pairs": sorted([[int(a), int(b)] for a, b in real_dup])},
+    )
+
+    # --- binary_search_for_n_clusters end-to-end + _binary_search_for_n_clusters isolated ---
+    rng_bs = np.random.RandomState(88)
+    bdata = np.vstack(
+        [
+            rng_bs.normal(loc=[0, 0], scale=0.5, size=(20, 2)),
+            rng_bs.normal(loc=[10, 10], scale=0.5, size=(20, 2)),
+            rng_bs.normal(loc=[-10, 10], scale=0.5, size=(20, 2)),
+        ]
+    ).astype(np.float32)
+    btree = build_kdtree(bdata)
+    bedges = parallel_boruvka(btree, np.int64(1), np.int64(5), True)
+    bsorted = bedges[np.argsort(bedges.T[2])].astype(np.float32)
+    buncond = mst_to_linkage_tree(bsorted)
+    approx_n_clusters = 3
+    leaves, clusters, strengths = _binary_search_for_n_clusters(buncond, approx_n_clusters, bdata.shape[0])
+    write(
+        "clustering_utilities",
+        "binary_search_for_n_clusters_n60",
+        {"default": "exact", "fields": {"strengths": {"rel": 1e-4, "abs": 1e-6}}},
+        {
+            "data": bdata.tolist(),
+            "approx_n_clusters": approx_n_clusters,
+            "min_samples": 5,
+            "n_threads": 1,
+            "uncondensed_tree": {
+                "left": [int(v) for v in buncond[:, 0]],
+                "right": [int(v) for v in buncond[:, 1]],
+                "delta": [float(v) for v in buncond[:, 2]],
+                "size": [int(v) for v in buncond[:, 3]],
+            },
+            "note": "3 well-separated gaussian blobs (20 points each, seed 88) so "
+                    "approx_n_clusters=3 is exactly achievable; this exercises "
+                    "the FULL binary_search_for_n_clusters pipeline (build_kdtree "
+                    "-> parallel_boruvka(reproducible=False as the public "
+                    "wrapper hardcodes) -> mst_to_linkage_tree -> "
+                    "_binary_search_for_n_clusters). uncondensed_tree is provided "
+                    "as an input so _binary_search_for_n_clusters is independently "
+                    "testable without re-deriving the MST. Binary search bisects "
+                    "min_cluster_size in [2, n_samples//2] on "
+                    "len(extract_leaves(condense_tree(tree, mid))) vs "
+                    "approx_n_clusters, using round-half-to-even-unspecified "
+                    "Python round() (banker's rounding on the .5 boundary -- "
+                    "replicate round(x) semantics, not int(x+0.5)). Terminates "
+                    "when the bracket narrows to width 1 OR mid collapses onto a "
+                    "bound; final choice is whichever of lower/upper bound's "
+                    "n_clusters is closer to approx_n_clusters, with a 3-way tie-"
+                    "break (prefer more non-noise points assigned) when both "
+                    "bounds are equidistant -- replicate ALL THREE branches "
+                    "(strictly-lower-closer, strictly-upper-closer, tie), not "
+                    "just the common case.",
+        },
+        {
+            "leaves": [int(v) for v in leaves],
+            "labels": [int(v) for v in clusters],
+            "strengths": [float(v) for v in strengths],
+        },
+    )
+
+
+def gen_clustering():
+    from evoc.knn_graph import knn_graph
+    from evoc.graph_construction import neighbor_graph_matrix
+    from evoc.label_propagation import label_propagation_init
+    from evoc.node_embedding import node_embedding
+    from evoc.clustering import build_cluster_layers
+    from sklearn.utils import check_random_state
+
+    # --- build_cluster_layers: the portable capstone fixture ---
+    # build_cluster_layers(data, ...) takes an ALREADY-COMPUTED embedding and has
+    # NO random_state parameter and NO internal RNG usage of its own (kdtree
+    # build, boruvka MST, condense_tree, min_cluster_size_barcode,
+    # compute_total_persistence, find_peaks, select_diverse_peaks,
+    # extract_clusters_by_id are all deterministic given their inputs -- see the
+    # cluster_trees (phase 6) and clustering_utilities (phase 8a) notes). That
+    # makes it fully and exactly recordable/replayable: record a realistic
+    # node-embedding-shaped input, record the output, done. This is the intended
+    # top-level parity target for phase 8 (see the evoc_clusters non-portability
+    # note below for why the fuller public entry point is NOT used instead).
+    #
+    # The input embedding below is produced by actually running the reference
+    # pipeline (knn_graph -> neighbor_graph_matrix -> label_propagation_init ->
+    # node_embedding) on a small hierarchical-blobs dataset -- i.e. it looks
+    # like real EVoC output, not an arbitrary point cloud -- chosen (by trying
+    # seeds) because it yields a genuine 2-layer result (base layer + one
+    # selected persistence peak), exercising find_peaks/select_diverse_peaks/
+    # extract_clusters_by_id/the layer-sorting step non-trivially. The
+    # embedding itself is recorded as a plain float32 array input; ports do NOT
+    # need to reproduce how it was produced (that is phases 7a/7b's job) --
+    # only build_cluster_layers's own logic is under test here.
+    seed = 1
+    rng = np.random.RandomState(seed)
+    n_super = rng.randint(3, 5)
+    super_centers = rng.uniform(-40, 40, size=(n_super, 12))
+    data_list = []
+    for sc in super_centers:
+        n_sub = rng.randint(2, 4)
+        sub_centers = sc + rng.normal(scale=rng.uniform(5, 10), size=(n_sub, 12))
+        for subc in sub_centers:
+            npts = rng.randint(10, 18)
+            data_list.append(subc + rng.normal(scale=rng.uniform(0.4, 1.0), size=(npts, 12)))
+    data = np.vstack(data_list).astype(np.float32)
+    data /= np.linalg.norm(data, axis=1, keepdims=True).astype(np.float32)
+    n_samples = data.shape[0]
+
+    rs = check_random_state(seed * 7 + 1)
+    nn_inds, nn_dists = knn_graph(data, n_neighbors=15, random_state=rs)
+    graph = neighbor_graph_matrix(1.0 * 15, nn_inds, nn_dists, True)
+    n_embedding_components = min(max(15 // 4, 4), 15)
+    init_embedding = label_propagation_init(
+        graph,
+        n_components=n_embedding_components,
+        approx_n_parts=int(np.clip(int(8 * np.sqrt(n_samples)), 256, 16384)),
+        random_scale=0.1,
+        scaling=0.5,
+        noise_level=0.5,
+        random_state=rs,
+        data=data,
+        n_label_prop_iter=20,
+    )
+    embedding = node_embedding(
+        graph,
+        n_components=n_embedding_components,
+        n_epochs=15,
+        initial_embedding=init_embedding,
+        negative_sample_rate=1.0,
+        noise_level=0.5,
+        random_state=rs,
+        verbose=False,
+        reproducible_flag=True,
+        initial_alpha=0.1,
+    )
+
+    min_samples = 5
+    base_min_cluster_size = 5
+    max_layers = 10
+    cluster_layers, membership_strength_layers, persistence_scores = build_cluster_layers(
+        embedding,
+        min_samples=min_samples,
+        base_min_cluster_size=base_min_cluster_size,
+        max_layers=max_layers,
+        reproducible_flag=True,
+    )
+    # Determinism check.
+    cl2, ms2, ps2 = build_cluster_layers(
+        embedding,
+        min_samples=min_samples,
+        base_min_cluster_size=base_min_cluster_size,
+        max_layers=max_layers,
+        reproducible_flag=True,
+    )
+    assert all(np.array_equal(a, b) for a, b in zip(cluster_layers, cl2))
+    assert all(np.allclose(a, b) for a, b in zip(membership_strength_layers, ms2))
+    assert persistence_scores == ps2
+    # reproducible_flag only bounds a multithreaded boruvka race (see boruvka
+    # phase-5 notes); at n_threads=1 it must be bit-identical to False.
+    cl3, ms3, ps3 = build_cluster_layers(
+        embedding,
+        min_samples=min_samples,
+        base_min_cluster_size=base_min_cluster_size,
+        max_layers=max_layers,
+        reproducible_flag=False,
+    )
+    assert all(np.array_equal(a, b) for a, b in zip(cluster_layers, cl3)), (
+        "reproducible_flag changed build_cluster_layers output at n_threads=1"
+    )
+
+    write(
+        "clustering",
+        "build_cluster_layers_n126",
+        {"default": "exact", "fields": {"membership_strengths": {"rel": 1e-4, "abs": 1e-6}, "persistence_scores": {"rel": 1e-4, "abs": 1e-6}}},
+        {
+            "embedding": embedding.tolist(),
+            "min_samples": min_samples,
+            "base_min_cluster_size": base_min_cluster_size,
+            "base_n_clusters": None,
+            "reproducible_flag": True,
+            "min_similarity_threshold": 0.2,
+            "max_layers": max_layers,
+            "note": "embedding (126x4 float32) is a REAL node_embedding output "
+                    "from running the reference pipeline (knn_graph -> "
+                    "neighbor_graph_matrix -> label_propagation_init -> "
+                    "node_embedding) on a hierarchical-blobs dataset (12-D unit-"
+                    "normalized, RandomState(1) recipe -- see gen_clustering in "
+                    "gen_fixtures.py). Ports do NOT need to reproduce how this "
+                    "embedding was derived (that is the label_propagation / "
+                    "node_embedding fixtures' job) -- treat 'embedding' as an "
+                    "opaque recorded input; only build_cluster_layers's own logic "
+                    "is under test here. build_cluster_layers has NO "
+                    "random_state parameter and no internal RNG of its own (numba "
+                    "kdtree build, boruvka MST -- reproducible_flag only affects "
+                    "multithreaded races, verified bit-identical to False here "
+                    "at n_threads=1 -- condense_tree, and all of "
+                    "clustering_utilities's persistence/peak-selection functions "
+                    "are deterministic given their inputs), so this fixture is "
+                    "the exact, fully portable end-to-end target for phase 8 "
+                    "(see the evoc_clusters_not_portable note in PORT_NOTES.md "
+                    "phase 8 for why the fuller evoc_clusters()/EVoC.fit_predict() "
+                    "entry points are NOT fixtured end-to-end instead). Base "
+                    "layer (index into the pre-sort list, always index 0 before "
+                    "sorting) uses condense_tree(uncondensed_tree, "
+                    "base_min_cluster_size) directly (base_n_clusters is None "
+                    "here, so the base_n_clusters branch in build_cluster_layers "
+                    "is NOT exercised by this fixture -- see PORT_NOTES.md for "
+                    "that gap). This dataset/seed yields exactly 2 cluster "
+                    "layers (a base layer with persistence_score 0.0, plus ONE "
+                    "selected persistence peak) -- output arrays below are "
+                    "ALREADY in the function's final sorted order (descending "
+                    "by n_clusters = layer.max()+1), matching what a port's "
+                    "output should be directly, no further reordering needed.",
+        },
+        {
+            "cluster_layers": [[int(v) for v in layer] for layer in cluster_layers],
+            "membership_strengths": [[float(v) for v in layer] for layer in membership_strength_layers],
+            "persistence_scores": [float(v) for v in persistence_scores],
+        },
+    )
+
+    # --- evoc_clusters / EVoC.fit_predict: documented as NOT bit-for-bit
+    # portable end-to-end, by design -- see PORT_NOTES.md phase 8 for the full
+    # explanation. Left unfixtured deliberately (no partial/best-effort fixture
+    # written here to avoid implying it is a parity target).
+
+
 GENERATORS = {
     "rng": gen_rng,
     "disjoint_set": gen_disjoint_set,
@@ -905,6 +2263,10 @@ GENERATORS = {
     "graph": gen_graph,
     "boruvka": gen_boruvka,
     "cluster_trees": gen_cluster_trees,
+    "label_propagation": gen_label_propagation,
+    "node_embedding": gen_node_embedding,
+    "clustering_utilities": gen_clustering_utilities,
+    "clustering": gen_clustering,
 }
 
 

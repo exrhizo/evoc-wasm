@@ -1,0 +1,30 @@
+{
+ "component": "label_propagation",
+ "case": "remap_labels",
+ "tolerance": "exact",
+ "inputs": {
+  "labels": [
+   5,
+   -1,
+   5,
+   2,
+   -1,
+   2,
+   9,
+   -1
+  ],
+  "note": "unique non-negative labels {2,5,9} remap to {0,1,2} in sorted order (np.unique); each remaining -1 gets a FRESH successive label starting at next_label = len(unique_labels) -- i.e. -1 entries do NOT collapse to a single label, each becomes its own new singleton cluster, assigned in array-index order."
+ },
+ "expected": {
+  "labels": [
+   1,
+   3,
+   1,
+   0,
+   4,
+   0,
+   2,
+   5
+  ]
+ }
+}

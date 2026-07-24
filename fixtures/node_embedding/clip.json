@@ -1,0 +1,43 @@
+{
+ "component": "node_embedding",
+ "case": "clip",
+ "tolerance": "exact",
+ "inputs": {
+  "cases": [
+   {
+    "val": 5.0,
+    "lo": -4.0,
+    "hi": 4.0
+   },
+   {
+    "val": -5.0,
+    "lo": -4.0,
+    "hi": 4.0
+   },
+   {
+    "val": 1.0,
+    "lo": -4.0,
+    "hi": 4.0
+   },
+   {
+    "val": 4.0,
+    "lo": -4.0,
+    "hi": 4.0
+   },
+   {
+    "val": -4.0,
+    "lo": -4.0,
+    "hi": 4.0
+   }
+  ]
+ },
+ "expected": {
+  "values": [
+   4.0,
+   -4.0,
+   1.0,
+   4.0,
+   -4.0
+  ]
+ }
+}

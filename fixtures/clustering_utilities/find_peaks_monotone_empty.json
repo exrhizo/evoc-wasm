@@ -1,0 +1,19 @@
+{
+ "component": "clustering_utilities",
+ "case": "find_peaks_monotone_empty",
+ "tolerance": "exact",
+ "inputs": {
+  "x": [
+   5.0,
+   4.0,
+   3.0,
+   2.0,
+   1.0,
+   0.0
+  ],
+  "note": "strictly decreasing -- no interior local maximum, expect empty result."
+ },
+ "expected": {
+  "peak_indices": []
+ }
+}

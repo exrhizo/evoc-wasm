@@ -1,0 +1,58 @@
+{
+ "component": "clustering_utilities",
+ "case": "estimate_cluster_similarity_seed45",
+ "tolerance": "exact",
+ "inputs": {
+  "births": [
+   56.0,
+   25.0,
+   17.0,
+   11.0,
+   18.0,
+   16.0,
+   5.0,
+   5.0,
+   5.0,
+   5.0,
+   5.0,
+   8.0,
+   5.0,
+   5.0,
+   5.0
+  ],
+  "deaths": [
+   118.0,
+   56.0,
+   56.0,
+   25.0,
+   25.0,
+   17.0,
+   17.0,
+   11.0,
+   11.0,
+   18.0,
+   18.0,
+   16.0,
+   16.0,
+   8.0,
+   8.0
+  ],
+  "cases": [
+   {
+    "birth_a": 5.0,
+    "birth_b": 56.0
+   },
+   {
+    "birth_a": 5.0,
+    "birth_b": 5.0
+   }
+  ],
+  "note": "births/deaths from min_cluster_size_barcode_seed45. For each case: clusters_a = indices i where births[i]<=birth_a AND deaths[i]>birth_a (half-open interval, matching compute_total_persistence's left-open/right-closed (birth, death] convention read backwards); same for clusters_b with birth_b. Result = jaccard_similarity(clusters_a, clusters_b) -- same birth_a/birth_b (2nd case) is NOT guaranteed to give similarity 1.0 in general (only if clusters_a's construction is deterministic given identical inputs, which it is here since both loops use the same arrays) so this case should come out as exactly 1.0."
+ },
+ "expected": {
+  "values": [
+   0.0,
+   1.0
+  ]
+ }
+}

@@ -1,0 +1,37 @@
+{
+ "component": "label_propagation",
+ "case": "label_outliers_disconnected",
+ "tolerance": "exact",
+ "inputs": {
+  "indptr": [
+   0,
+   0,
+   2,
+   4
+  ],
+  "indices": [
+   2,
+   1,
+   1,
+   2
+  ],
+  "labels": [
+   -1,
+   0,
+   1
+  ],
+  "rng_state": [
+   42,
+   84,
+   126
+  ],
+  "note": "node 0 has zero edges (indptr[0]==indptr[1]==0), so its BFS node_queue=[0] pops with no neighbors, unlabelled stays True, and it falls through to labels[0] = tau_rand_int(rng_state+0) % (max_label+1). max_label = labels.max() computed BEFORE the loop (== 1 here, from the initial labels array, not updated labels), so modulus is 2 regardless of what other nodes resolve to."
+ },
+ "expected": {
+  "labels": [
+   0,
+   0,
+   1
+  ]
+ }
+}

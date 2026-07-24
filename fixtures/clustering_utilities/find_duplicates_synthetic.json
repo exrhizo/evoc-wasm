@@ -1,0 +1,118 @@
+{
+ "component": "clustering_utilities",
+ "case": "find_duplicates_synthetic",
+ "tolerance": "exact",
+ "inputs": {
+  "knn_indices": [
+   [
+    1,
+    2,
+    3
+   ],
+   [
+    0,
+    2,
+    3
+   ],
+   [
+    3,
+    0,
+    1
+   ],
+   [
+    2,
+    0,
+    1
+   ],
+   [
+    5,
+    6,
+    0
+   ],
+   [
+    4,
+    6,
+    0
+   ],
+   [
+    4,
+    5,
+    0
+   ]
+  ],
+  "knn_dists": [
+   [
+    0.0,
+    0.5,
+    0.6000000238418579
+   ],
+   [
+    0.0,
+    0.4000000059604645,
+    0.5
+   ],
+   [
+    0.10000000149011612,
+    0.5,
+    0.6000000238418579
+   ],
+   [
+    0.10000000149011612,
+    0.5,
+    0.6000000238418579
+   ],
+   [
+    0.8999999761581421,
+    0.949999988079071,
+    1.0
+   ],
+   [
+    0.8999999761581421,
+    0.9200000166893005,
+    1.0
+   ],
+   [
+    0.8999999761581421,
+    0.9200000166893005,
+    1.0
+   ]
+  ],
+  "note": "duplicate_distance = max(knn_dists[:, 0]) (the largest NEAREST-neighbor distance across all points, i.e. the reference's own worst-case 1st-neighbor distance sets the threshold for what counts as 'duplicate' EVERYWHERE -- a single noisy row inflates the threshold globally). For every (i, knn_indices[i,j]) pair with knn_dists[i,j] <= that threshold: canonicalize as (min(i,k), max(i,k)) and add to a set (dedups automatically); i==k (self-neighbor) pairs are explicitly skipped via the elif/else chain. Row 0/1 rows 2/3 are mutually 0.0-or-0.1 distance (all pairwise duplicates); row 4/5/6 sit right at the 0.9 threshold (inclusive <=) so (4,5) qualifies but the 0.92/0.95 second neighbors do not."
+ },
+ "expected": {
+  "duplicate_pairs": [
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    2
+   ],
+   [
+    0,
+    3
+   ],
+   [
+    1,
+    2
+   ],
+   [
+    1,
+    3
+   ],
+   [
+    2,
+    3
+   ],
+   [
+    4,
+    5
+   ],
+   [
+    4,
+    6
+   ]
+  ]
+ }
+}

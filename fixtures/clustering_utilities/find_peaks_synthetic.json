@@ -1,0 +1,31 @@
+{
+ "component": "clustering_utilities",
+ "case": "find_peaks_synthetic",
+ "tolerance": "exact",
+ "inputs": {
+  "x": [
+   0.0,
+   1.0,
+   3.0,
+   2.0,
+   1.0,
+   0.0,
+   2.0,
+   5.0,
+   3.0,
+   1.0,
+   0.0,
+   4.0,
+   4.0,
+   1.0
+  ],
+  "note": "1-D signal with 3 local maxima at indices 2 (value 3), 7 (value 5), and 11 (value 4, a width-2 plateau at indices 11-12 -- find_peaks's midpoint = (left_edge+right_edge)//2 picks the LEFT of the plateau pair). First/last samples can never be peaks by construction (i starts at 1, loop bound is x.shape[0]-1)."
+ },
+ "expected": {
+  "peak_indices": [
+   2,
+   7,
+   11
+  ]
+ }
+}

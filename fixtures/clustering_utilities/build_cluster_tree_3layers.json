@@ -1,0 +1,99 @@
+{
+ "component": "clustering_utilities",
+ "case": "build_cluster_tree_3layers",
+ "tolerance": "exact",
+ "inputs": {
+  "labels": [
+   [
+    0,
+    0,
+    1,
+    1,
+    2,
+    2,
+    -1,
+    3,
+    3
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    -1,
+    1,
+    1
+   ],
+   [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    -1,
+    0,
+    0
+   ]
+  ],
+  "note": "labels[0] is the FINEST (base) layer, labels[-1] the COARSEST; -1 entries are noise at that layer, excluded from the tree. _build_cluster_tree walks upper_layer from 1 upward, and for each upper_layer scans lower_layer from upper_layer-1 down to 0, grouping lower-layer labels by which upper-layer cluster they fall under (via argsort + np.split on bincount cumsum) and recording a (parent_layer, parent_label, child_layer, child_label) edge the FIRST time a given (child_layer, child_label) is seen (found[] set dedup, seeded with {-1} per layer so noise is never recorded). After that pass, any (layer, label) not yet found gets attached as a synthetic child of (len(labels), 0) -- a virtual root above the top layer. The reference's iteration order over dict/set is NOT guaranteed stable; this fixture's 'expected' is a CANONICALIZED form: a list sorted by (parent_layer, parent_cluster), each entry's children list sorted too. Compare as sets, not sequences."
+ },
+ "expected": {
+  "tree": [
+   {
+    "parent_layer": 1,
+    "parent_cluster": 0,
+    "children": [
+     [
+      0,
+      0
+     ],
+     [
+      0,
+      1
+     ]
+    ]
+   },
+   {
+    "parent_layer": 1,
+    "parent_cluster": 1,
+    "children": [
+     [
+      0,
+      2
+     ],
+     [
+      0,
+      3
+     ]
+    ]
+   },
+   {
+    "parent_layer": 2,
+    "parent_cluster": 0,
+    "children": [
+     [
+      1,
+      0
+     ],
+     [
+      1,
+      1
+     ]
+    ]
+   },
+   {
+    "parent_layer": 3,
+    "parent_cluster": 0,
+    "children": [
+     [
+      2,
+      0
+     ]
+    ]
+   }
+  ]
+ }
+}

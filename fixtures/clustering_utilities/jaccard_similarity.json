@@ -1,0 +1,65 @@
+{
+ "component": "clustering_utilities",
+ "case": "jaccard_similarity",
+ "tolerance": "exact",
+ "inputs": {
+  "cases": [
+   {
+    "a": [
+     1,
+     2,
+     3
+    ],
+    "b": [
+     2,
+     3,
+     4
+    ]
+   },
+   {
+    "a": [
+     1,
+     2,
+     3
+    ],
+    "b": [
+     1,
+     2,
+     3
+    ]
+   },
+   {
+    "a": [
+     1,
+     2,
+     3
+    ],
+    "b": [
+     4,
+     5,
+     6
+    ]
+   },
+   {
+    "a": [],
+    "b": []
+   },
+   {
+    "a": [
+     7
+    ],
+    "b": []
+   }
+  ],
+  "note": "set_a_array/set_b_array are int64 arrays in the reference. Empty/empty -> union_count==0 -> returns 0.0 (not NaN, not an error). Order matters for the ALGORITHM (union_set starts as set(a), then b's items are folded in) but NOT for the final numeric result (jaccard is symmetric) -- still replicate the exact iteration for parity of any future extension."
+ },
+ "expected": {
+  "values": [
+   0.5,
+   1.0,
+   0.0,
+   0.0,
+   0.0
+  ]
+ }
+}
