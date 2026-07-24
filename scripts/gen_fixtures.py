@@ -470,12 +470,441 @@ def gen_nndescent():
         )
 
 
+def gen_graph():
+    from evoc.graph_construction import (
+        smooth_knn_dist,
+        compute_membership_strengths,
+        neighbor_graph_matrix,
+    )
+    from evoc.knn_graph import make_forest, nn_descent, INT32_MIN, INT32_MAX
+    from sklearn.utils import check_random_state
+    import numba
+
+    rng = np.random.RandomState(5)
+
+    # --- smooth_knn_dist ---
+    # Rows sorted ascending like real knn output; row 0 has a single leading
+    # zero (self-distance), row 1 has two leading zeros (duplicate points) to
+    # hit the rho branch and the "zero distances beyond index 0" case.
+    n, k = 40, 15
+    dists = np.abs(rng.normal(size=(n, k))).astype(np.float32)
+    dists.sort(axis=1)
+    dists[0, 0] = 0.0
+    dists[1, :2] = 0.0
+    sigmas, rhos = smooth_knn_dist(dists, float(k))
+    write(
+        "graph",
+        "smooth_knn_dist_n40_k15",
+        {"rel": 1e-4, "abs": 1e-6},
+        {
+            "distances": dists.tolist(),
+            "k": float(k),
+            "n_iter": 64,
+            "bandwidth": 1.0,
+            "note": "distances rows are sorted ascending (as real knn output would "
+                    "be); row 0 has one leading zero, row 1 has two leading zeros "
+                    "to exercise the rho / zero-distance branches",
+        },
+        {"sigmas": sigmas.tolist(), "rhos": rhos.tolist()},
+    )
+
+    # --- compute_membership_strengths ---
+    # Reuse the smooth_knn_dist distances/sigmas/rhos above; build indices with
+    # a -1 padded slot (missing neighbor) and a self-index (idx == i) to hit
+    # both special-case branches.
+    inds = rng.randint(0, n, size=(n, k)).astype(np.int32)
+    inds[0, -1] = -1
+    inds[0, -2] = -1
+    inds[5, 0] = 5  # self-index branch (val = 0.0)
+    rows, cols, vals = compute_membership_strengths(inds, dists, sigmas, rhos)
+    write(
+        "graph",
+        "compute_membership_strengths_n40_k15",
+        {"default": "exact", "fields": {"vals": {"rel": 1e-4, "abs": 1e-6}}},
+        {
+            "knn_indices": inds.tolist(),
+            "knn_dists": dists.tolist(),
+            "sigmas": sigmas.tolist(),
+            "rhos": rhos.tolist(),
+            "note": "knn_indices row 0 has a -1 padded tail (missing neighbors); "
+                    "row 5's first neighbor is a self-index (idx == i)",
+        },
+        {"rows": rows.tolist(), "cols": cols.tolist(), "vals": vals.tolist()},
+    )
+
+    # --- neighbor_graph_matrix ---
+    # Real small pipeline: reuse the existing nn_descent_float fixture's knn
+    # output, apply knn_graph.py's float distance transform
+    # (np.maximum(-np.log2(-d), 0.0)) to get the same transformed distances
+    # knn_graph() would hand to neighbor_graph_matrix, then build the graph.
+    nnd_path = os.path.join(FIXTURES_DIR, "nndescent", "nn_descent_float_n150_d8_k10.json")
+    with open(nnd_path) as f:
+        nnd_fixture = json.load(f)
+    knn_inds = np.array(nnd_fixture["expected"]["indices"], dtype=np.int32)
+    raw_dists = np.array(nnd_fixture["expected"]["distances"], dtype=np.float32)
+    transformed_dists = np.maximum(-np.log2(-raw_dists), 0.0).astype(np.float32)
+
+    for symmetrize in (True, False):
+        graph = neighbor_graph_matrix(
+            1.0 * 15, knn_inds, transformed_dists, symmetrize=symmetrize
+        )
+        csr = graph.tocsr()
+        csr.sort_indices()
+        write(
+            "graph",
+            f"neighbor_graph_matrix_symmetrize_{str(symmetrize).lower()}",
+            {"default": "exact", "fields": {"data": {"rel": 1e-4, "abs": 1e-6}}},
+            {
+                "source": "fixtures/nndescent/nn_descent_float_n150_d8_k10.json "
+                           "(expected.indices / expected.distances)",
+                "knn_indices": knn_inds.tolist(),
+                "knn_dists_transformed": transformed_dists.tolist(),
+                "n_neighbors": 15.0,
+                "symmetrize": symmetrize,
+                "note": "knn_dists_transformed = np.maximum(-np.log2(-raw_dists), 0.0) "
+                        "applied to the nn_descent_float fixture's raw (negative "
+                        "cosine similarity) distances, exactly as knn_graph.nn_descent "
+                        "does for float input. Expected matrix is .tocsr().sort_indices() "
+                        "canonicalized (indptr/indices exact, data rel 1e-4).",
+            },
+            {
+                "indptr": [int(x) for x in csr.indptr],
+                "indices": [int(x) for x in csr.indices],
+                "data": [float(x) for x in csr.data],
+            },
+        )
+
+    # --- knn_graph end-to-end ---
+    # numpy's Mersenne Twister isn't available in Rust/Zig, so instead of
+    # replaying RandomState draws we call the internals (make_forest,
+    # nn_descent) directly with recorded rng_state / rng_states, exactly as
+    # knn_graph() does internally. This was verified against a real
+    # knn_graph(data, n_neighbors=10, random_state=42) call: the manual
+    # replay below reproduces knn_graph's own inds/dists bit-for-bit.
+    data = rng.normal(size=(120, 8)).astype(np.float32)
+    data /= np.linalg.norm(data, axis=1, keepdims=True).astype(np.float32)
+    assert np.allclose(np.linalg.norm(data, axis=1), 1.0)
+
+    n_neighbors = 10
+    crs = check_random_state(42)
+    rng_state = crs.randint(INT32_MIN, INT32_MAX, 3).astype(np.int64)
+
+    # Single-thread default (NUMBA_NUM_THREADS=1 is forced for fixture gen):
+    # n_trees = max(4, min(8, numba.get_num_threads())) == 4
+    n_trees = max(4, min(8, numba.get_num_threads()))
+    n_iters = max(5, int(round(np.log2(data.shape[0]))))
+    leaf_size = max(10, n_neighbors)
+    effective_max_candidates = min(60, int(n_neighbors * 1.5))
+
+    rng_states = crs.randint(INT32_MIN, INT32_MAX, size=(n_trees, 3)).astype(np.int64)
+    leaf_array = make_forest(
+        data, n_neighbors, n_trees, leaf_size, check_random_state(42), np.float32, max_depth=200
+    )
+    # make_forest draws its own rng_states internally from the RandomState
+    # (same draw as rng_states above, since it's a fresh check_random_state(42)
+    # advanced past the same first draw) -- reconstruct via a fresh RandomState
+    # replay to keep the two draws (rng_state, then rng_states) in lockstep.
+    crs2 = check_random_state(42)
+    _ = crs2.randint(INT32_MIN, INT32_MAX, 3).astype(np.int64)  # consume rng_state draw
+    leaf_array = make_forest(
+        data, n_neighbors, n_trees, leaf_size, crs2, np.float32, max_depth=200
+    )
+
+    nn_inds, nn_dists = nn_descent(
+        data,
+        n_neighbors,
+        rng_state.copy(),
+        effective_max_candidates,
+        n_iters,
+        0.001,
+        np.float32,
+        leaf_array=leaf_array,
+        verbose=False,
+        use_sorted_updates=True,
+        delta_improv=0.001,
+    )
+
+    # Verify the replay is watertight against the real public entry point.
+    ref_inds, ref_dists = __import__("evoc.knn_graph", fromlist=["knn_graph"]).knn_graph(
+        data.copy(), n_neighbors=n_neighbors, random_state=42
+    )
+    assert np.array_equal(nn_inds, ref_inds), "knn_graph replay indices mismatch"
+    assert np.allclose(nn_dists, ref_dists), "knn_graph replay distances mismatch"
+
+    write(
+        "graph",
+        "knn_graph_n120_d8_k10_seed42",
+        {"default": "exact", "fields": {"nn_dists": {"rel": 1e-4, "abs": 1e-6}}},
+        {
+            "data": data.tolist(),
+            "n_neighbors": n_neighbors,
+            "random_state": 42,
+            "n_trees": n_trees,
+            "leaf_size": leaf_size,
+            "n_iters": n_iters,
+            "effective_max_candidates": effective_max_candidates,
+            "delta": 0.001,
+            "delta_improv": 0.001,
+            "use_sorted_updates": True,
+            "rng_state": [int(v) for v in rng_state],
+            "rng_states": rng_states.tolist(),
+            "note": "data is pre-unit-normalized (knn_graph's normalization path is "
+                    "a no-op here, verified by np.allclose(norms, 1.0)). This fixture "
+                    "was NOT produced by replaying numpy's Mersenne Twister draw-by-draw "
+                    "in the ports; it records the ACTUAL rng_state (drawn first) and "
+                    "rng_states (drawn second, one triple per tree, inside make_forest) "
+                    "that a real check_random_state(42) produces for this call shape. "
+                    "Ports should feed rng_state into nn_descent's RNG and rng_states "
+                    "(row i) into tree i's RP-tree construction RNG, exactly matching "
+                    "make_forest()'s per-tree draw order. This was verified: calling "
+                    "make_forest(data, n_neighbors, n_trees=4, leaf_size=10, "
+                    "RandomState(42) after consuming the first rng_state draw, float32, "
+                    "max_depth=200) then nn_descent(...) with these exact recorded "
+                    "values reproduces knn_graph(data, n_neighbors=10, random_state=42)'s "
+                    "output bit-for-bit (assert checked at fixture-generation time).",
+        },
+        {"nn_inds": nn_inds.tolist(), "nn_dists": nn_dists.tolist()},
+    )
+
+
+def gen_boruvka():
+    from evoc.numba_kdtree import build_kdtree, parallel_tree_query
+    from evoc.boruvka import parallel_boruvka, initialize_boruvka_from_knn
+    from evoc.disjoint_set import ds_rank_create
+
+    rng = np.random.RandomState(31)
+    n, d = 80, 4
+    data = rng.normal(size=(n, d)).astype(np.float32)
+    leaf_size = 10
+    tree = build_kdtree(data, leaf_size=leaf_size)
+    min_samples = 5
+    n_threads = 1
+
+    for reproducible in (False, True):
+        edges = parallel_boruvka(
+            tree, np.int64(n_threads), np.int64(min_samples), reproducible
+        )
+        write(
+            "boruvka",
+            f"parallel_boruvka_n80_d4_reproducible_{str(reproducible).lower()}",
+            {"default": "exact", "fields": {"distance": {"rel": 1e-4, "abs": 1e-6}}},
+            {
+                "data": data.tolist(),
+                "leaf_size": leaf_size,
+                "n_threads": n_threads,
+                "min_samples": min_samples,
+                "reproducible": reproducible,
+                "note": "build_kdtree(data, leaf_size=leaf_size) then "
+                        "parallel_boruvka(tree, n_threads, min_samples, reproducible). "
+                        "Edges are recorded exactly as returned (no re-sorting); "
+                        "each row is [point_a, point_b, distance] with point_a/point_b "
+                        "stored as floats by the reference (cast to int32 for parity) "
+                        "and distance already sqrt-transformed (all_edges[:,2] = "
+                        "sqrt(all_edges[:,2]) is applied before return).",
+            },
+            {
+                "point_a": [int(v) for v in edges[:, 0]],
+                "point_b": [int(v) for v in edges[:, 1]],
+                "distance": [float(v) for v in edges[:, 2]],
+            },
+        )
+
+    # --- initialize_boruvka_from_knn, isolated ---
+    # Cleanly callable on its own: needs knn indices/distances (from
+    # parallel_tree_query with k=min_samples+1, output_rdist=True), per-point
+    # core distances (== last column of those rdist distances), and a fresh
+    # disjoint set. Record the query outputs as inputs so this stage is
+    # independently testable from recorded data alone.
+    distances, neighbors = parallel_tree_query(
+        tree, tree.data, k=np.int64(min_samples + 1), output_rdist=True
+    )
+    core_distances = distances.T[-1].copy()
+    ds = ds_rank_create(tree.data.shape[0])
+    initial_edges = initialize_boruvka_from_knn(neighbors, distances, core_distances, ds)
+    write(
+        "boruvka",
+        "initialize_boruvka_from_knn_n80_d4",
+        {"default": "exact", "fields": {"distance": {"rel": 1e-4, "abs": 1e-6}}},
+        {
+            "knn_indices": neighbors.tolist(),
+            "knn_distances_rdist": distances.tolist(),
+            "core_distances": core_distances.tolist(),
+            "n_points": n,
+            "note": "knn_indices/knn_distances_rdist are parallel_tree_query(tree, "
+                    "tree.data, k=min_samples+1, output_rdist=True) output (rdist = "
+                    "squared euclidean, NOT sqrt'd). core_distances is the last "
+                    "column of knn_distances_rdist. disjoint_set is freshly created "
+                    "via ds_rank_create(n_points) (rank-based, all singletons) before "
+                    "calling initialize_boruvka_from_knn. Output edge distances are "
+                    "raw max(core_distance, knn_distance) in rdist space, NOT sqrt'd "
+                    "(that sqrt only happens once, at the very end of "
+                    "parallel_boruvka, applied to the whole accumulated edge set).",
+        },
+        {
+            "point_a": [int(v) for v in initial_edges[:, 0]],
+            "point_b": [int(v) for v in initial_edges[:, 1]],
+            "distance": [float(v) for v in initial_edges[:, 2]],
+        },
+    )
+
+
+def gen_cluster_trees():
+    from evoc.numba_kdtree import build_kdtree
+    from evoc.boruvka import parallel_boruvka
+    from evoc.cluster_trees import (
+        mst_to_linkage_tree,
+        condense_tree,
+        extract_leaves,
+        get_cluster_label_vector,
+        get_point_membership_strength_vector,
+        extract_eom_clusters,
+        cluster_tree_from_condensed_tree,
+    )
+
+    # A blob-structured dataset (4 well-separated gaussian clusters) gives a
+    # condensed tree with real cluster structure -- a single-gaussian dataset
+    # collapses to one dominant cluster and an empty cluster_tree, which
+    # would make extract_eom_clusters trivially empty and under-exercise the
+    # recursion.
+    rng = np.random.RandomState(31)
+    n, d = 80, 4
+    centers = rng.uniform(-8, 8, size=(4, d))
+    data = np.vstack(
+        [centers[i] + rng.normal(scale=0.6, size=(20, d)) for i in range(4)]
+    ).astype(np.float32)
+
+    leaf_size = 10
+    tree = build_kdtree(data, leaf_size=leaf_size)
+    min_samples = 5
+    edges = parallel_boruvka(tree, np.int64(1), np.int64(min_samples), False)
+    sorted_mst = edges[np.argsort(edges.T[2])].astype(np.float32)
+
+    write(
+        "cluster_trees",
+        "mst_to_linkage_tree_n80",
+        {"default": "exact", "fields": {"delta": {"rel": 1e-4, "abs": 1e-6}}},
+        {
+            "sorted_mst": {
+                "point_a": [int(v) for v in sorted_mst[:, 0]],
+                "point_b": [int(v) for v in sorted_mst[:, 1]],
+                "distance": [float(v) for v in sorted_mst[:, 2]],
+            },
+            "note": "sorted_mst is boruvka's parallel_boruvka(data 80x4 gaussian-blobs "
+                    "seed 31, n_threads=1, min_samples=5, reproducible=False) edge set, "
+                    "sorted by np.argsort(edges.T[2]) exactly as clustering.py does "
+                    "before calling mst_to_linkage_tree. Reconstruct the (n-1, 3) "
+                    "float32 array from point_a/point_b/distance columns in order.",
+        },
+        {
+            "left": [int(v) for v in mst_to_linkage_tree(sorted_mst)[:, 0]],
+            "right": [int(v) for v in mst_to_linkage_tree(sorted_mst)[:, 1]],
+            "delta": [float(v) for v in mst_to_linkage_tree(sorted_mst)[:, 2]],
+            "size": [int(v) for v in mst_to_linkage_tree(sorted_mst)[:, 3]],
+        },
+    )
+
+    hierarchy = mst_to_linkage_tree(sorted_mst)
+    min_cluster_size = 5
+    ctree = condense_tree(hierarchy, min_cluster_size)
+    write(
+        "cluster_trees",
+        "condense_tree_n80_mcs5",
+        {"default": "exact", "fields": {"lambda_val": {"rel": 1e-4, "abs": 1e-6}}},
+        {
+            "hierarchy": {
+                "left": [int(v) for v in hierarchy[:, 0]],
+                "right": [int(v) for v in hierarchy[:, 1]],
+                "delta": [float(v) for v in hierarchy[:, 2]],
+                "size": [int(v) for v in hierarchy[:, 3]],
+            },
+            "min_cluster_size": min_cluster_size,
+            "note": "hierarchy columns reconstruct mst_to_linkage_tree's (n-1, 4) "
+                    "float64 output (left, right, delta, size). CondensedTree fields "
+                    "in the reference are parent:int64, child:int64, "
+                    "lambda_val:float32, child_size:int64.",
+        },
+        {
+            "parent": [int(v) for v in ctree.parent],
+            "child": [int(v) for v in ctree.child],
+            "lambda_val": [float(v) for v in ctree.lambda_val],
+            "child_size": [int(v) for v in ctree.child_size],
+        },
+    )
+
+    leaves = extract_leaves(ctree)
+    n_samples = n
+    cluster_selection_epsilon = 0.0
+    clusters = get_cluster_label_vector(ctree, leaves, cluster_selection_epsilon, n_samples)
+    strengths = get_point_membership_strength_vector(ctree, leaves, clusters)
+    write(
+        "cluster_trees",
+        "labels_and_strengths_n80_mcs5",
+        {"default": "exact", "fields": {"strengths": {"rel": 1e-4, "abs": 1e-6}}},
+        {
+            "condensed_tree": {
+                "parent": [int(v) for v in ctree.parent],
+                "child": [int(v) for v in ctree.child],
+                "lambda_val": [float(v) for v in ctree.lambda_val],
+                "child_size": [int(v) for v in ctree.child_size],
+            },
+            "cluster_selection_epsilon": cluster_selection_epsilon,
+            "n_samples": n_samples,
+            "note": "leaves = extract_leaves(condensed_tree) (allow_single_cluster "
+                    "defaults True but is irrelevant to extract_leaves itself -- it "
+                    "takes no cluster_selection input); "
+                    "clusters = get_cluster_label_vector(condensed_tree, leaves, "
+                    "cluster_selection_epsilon, n_samples); "
+                    "strengths = get_point_membership_strength_vector(condensed_tree, "
+                    "leaves, clusters). 'leaves' (extract_leaves output) is included "
+                    "below as expected.leaves for the extract_leaves parity check.",
+        },
+        {
+            "leaves": [int(v) for v in leaves],
+            "labels": [int(v) for v in clusters],
+            "strengths": [float(v) for v in strengths],
+        },
+    )
+
+    cluster_tree = cluster_tree_from_condensed_tree(ctree)
+    eom_clusters = extract_eom_clusters(ctree, cluster_tree, allow_single_cluster=False)
+    write(
+        "cluster_trees",
+        "extract_eom_clusters_n80_mcs5",
+        "exact",
+        {
+            "condensed_tree": {
+                "parent": [int(v) for v in ctree.parent],
+                "child": [int(v) for v in ctree.child],
+                "lambda_val": [float(v) for v in ctree.lambda_val],
+                "child_size": [int(v) for v in ctree.child_size],
+            },
+            "allow_single_cluster": False,
+            "note": "cluster_tree = cluster_tree_from_condensed_tree(condensed_tree) "
+                    "(mask = condensed_tree.child_size > 1) is recomputed by the port "
+                    "from condensed_tree -- it is deterministic and not separately "
+                    "fixtured. eom_clusters is the set of selected cluster node ids; "
+                    "order is NOT significant (reference builds it from an unordered "
+                    "numba typed-dict iteration) -- compare as sets/sorted.",
+        },
+        {
+            "cluster_tree_parent": [int(v) for v in cluster_tree.parent],
+            "cluster_tree_child": [int(v) for v in cluster_tree.child],
+            "cluster_tree_lambda_val": [float(v) for v in cluster_tree.lambda_val],
+            "cluster_tree_child_size": [int(v) for v in cluster_tree.child_size],
+            "eom_clusters": sorted(int(v) for v in eom_clusters),
+        },
+    )
+
+
 GENERATORS = {
     "rng": gen_rng,
     "disjoint_set": gen_disjoint_set,
     "distance": gen_distance,
     "kdtree": gen_kdtree,
     "nndescent": gen_nndescent,
+    "graph": gen_graph,
+    "boruvka": gen_boruvka,
+    "cluster_trees": gen_cluster_trees,
 }
 
 
