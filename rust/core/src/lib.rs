@@ -10,3 +10,5 @@ pub mod distance;
 pub mod nnd_heap;
 pub mod kdtree;
 pub mod nndescent_float;
+pub mod knn_graph;
+pub mod graph_construction;
