@@ -12,6 +12,7 @@ pub const nnd_heap = @import("nnd_heap.zig");
 pub const nndescent_float = @import("nndescent_float.zig");
 pub const graph_construction = @import("graph_construction.zig");
 pub const knn_graph = @import("knn_graph.zig");
+pub const boruvka = @import("boruvka.zig");
 
 // Test-only fixture-loading helper (not part of the freestanding surface).
 const fixture = @import("fixture.zig");

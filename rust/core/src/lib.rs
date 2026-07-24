@@ -12,3 +12,4 @@ pub mod kdtree;
 pub mod nndescent_float;
 pub mod knn_graph;
 pub mod graph_construction;
+pub mod boruvka;
