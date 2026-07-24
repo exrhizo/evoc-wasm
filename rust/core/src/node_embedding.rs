@@ -28,8 +28,7 @@ pub fn make_epochs_per_sample(weights: &[f32], n_epochs: usize) -> Vec<f32> {
     let mut result = vec![0.0f32; weights.len()];
     for (i, &w) in weights.iter().enumerate() {
         // n_samples in f64, floored at 1.0, then cast to f32
-        let n_samples_f64 =
-            (n_epochs as f64 * (w as f64 / w_max as f64)).max(1.0);
+        let n_samples_f64 = (n_epochs as f64 * (w as f64 / w_max as f64)).max(1.0);
         let n_samples_f32 = n_samples_f64 as f32;
         // float(n_epochs) / n_samples_f32  (numpy broadcasts the f64 scalar
         // against the f32 array, yielding f32)
@@ -84,12 +83,15 @@ pub fn node_embedding_epoch(
             let j = head[i] as usize;
             let k = tail[i] as usize;
 
-            let dist_squared = rdist(&embedding[j * dim..j * dim + dim], &embedding[k * dim..k * dim + dim]);
+            let dist_squared = rdist(
+                &embedding[j * dim..j * dim + dim],
+                &embedding[k * dim..k * dim + dim],
+            );
 
             if dist_squared > 0.0 {
                 let dist = dist_squared.sqrt();
-                let grad_coeff = (-2.0 * noise_level * dist - 2.0)
-                    / (2.0 * dist_squared - 0.5 * dist + 1.0);
+                let grad_coeff =
+                    (-2.0 * noise_level * dist - 2.0) / (2.0 * dist_squared - 0.5 * dist + 1.0);
 
                 for di in 0..dim {
                     let grad_d = grad_coeff * (embedding[j * dim + di] - embedding[k * dim + di]);
@@ -183,12 +185,14 @@ pub fn node_embedding_epoch_repr(
                     epoch_of_next_sample[raw_index] += epochs_per_sample[raw_index];
 
                     let n_neg_samples = ((n as f32 - epoch_of_next_negative_sample[raw_index])
-                        / epochs_per_negative_sample[raw_index]) as i64;
+                        / epochs_per_negative_sample[raw_index])
+                        as i64;
 
                     for p in 0..n_neg_samples {
                         // node_order[(raw_index * (n + p + 1) * rng_state) % n_vertices]
                         let order_idx = ((raw_index as i64 * (n as i64 + p + 1) * rng_state as i64)
-                            .rem_euclid(n_vertices as i64)) as usize;
+                            .rem_euclid(n_vertices as i64))
+                            as usize;
                         let to_node = node_order[order_idx] as usize;
 
                         let dist_squared = rdist(
@@ -262,8 +266,10 @@ pub fn node_embedding_repr(
     let mut embedding = initial_embedding.to_vec();
 
     let epochs_per_sample = make_epochs_per_sample(graph_data, n_epochs);
-    let mut epochs_per_negative_sample: Vec<f32> =
-        epochs_per_sample.iter().map(|&e| e / negative_sample_rate).collect();
+    let mut epochs_per_negative_sample: Vec<f32> = epochs_per_sample
+        .iter()
+        .map(|&e| e / negative_sample_rate)
+        .collect();
     // reproducible path inflates by 1.5
     for e in epochs_per_negative_sample.iter_mut() {
         *e *= 1.5;
@@ -376,8 +382,23 @@ mod tests {
         let mut updates = vec![0.0f32; 4];
         let node_order = vec![0u32, 1];
         node_embedding_epoch_repr(
-            &mut embedding, &indptr, &indices, 2, &eps, 7, 2, 0.1, &epns, &mut eons,
-            &mut eonss, 0, 0.5, 1.0, &mut updates, &node_order, 4096,
+            &mut embedding,
+            &indptr,
+            &indices,
+            2,
+            &eps,
+            7,
+            2,
+            0.1,
+            &epns,
+            &mut eons,
+            &mut eonss,
+            0,
+            0.5,
+            1.0,
+            &mut updates,
+            &node_order,
+            4096,
         );
         assert_eq!(embedding, before);
     }

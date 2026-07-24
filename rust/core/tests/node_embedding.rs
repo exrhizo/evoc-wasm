@@ -21,7 +21,11 @@ fn flatten(m: &[Vec<f32>]) -> Vec<f32> {
 }
 
 fn json_u32_vec(v: &serde_json::Value) -> Vec<u32> {
-    v.as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u32).collect()
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_u64().unwrap() as u32)
+        .collect()
 }
 
 #[test]
@@ -136,7 +140,10 @@ fn node_embedding_epoch_single_epoch_n120() {
 
 #[test]
 fn node_embedding_epoch_repr_single_epoch_n120() {
-    let fixture = load("node_embedding", "node_embedding_epoch_repr_single_epoch_n120");
+    let fixture = load(
+        "node_embedding",
+        "node_embedding_epoch_repr_single_epoch_n120",
+    );
     let tol = Tolerance::parse(&fixture["tolerance"]);
     let inputs = &fixture["inputs"];
 
@@ -191,14 +198,19 @@ fn node_embedding_epoch_repr_single_epoch_n120() {
     }
 
     let expected_eons = json_f32_vec(&fixture["expected"]["epoch_of_next_sample_after"]);
-    for (i, (&a, &e)) in epoch_of_next_sample.iter().zip(expected_eons.iter()).enumerate() {
+    for (i, (&a, &e)) in epoch_of_next_sample
+        .iter()
+        .zip(expected_eons.iter())
+        .enumerate()
+    {
         tol.assert_close(a, e, &format!("epoch_of_next_sample[{i}]"));
     }
 
-    let expected_eonns =
-        json_f32_vec(&fixture["expected"]["epoch_of_next_negative_sample_after"]);
-    for (i, (&a, &e)) in
-        epoch_of_next_negative_sample.iter().zip(expected_eonns.iter()).enumerate()
+    let expected_eonns = json_f32_vec(&fixture["expected"]["epoch_of_next_negative_sample_after"]);
+    for (i, (&a, &e)) in epoch_of_next_negative_sample
+        .iter()
+        .zip(expected_eonns.iter())
+        .enumerate()
     {
         tol.assert_close(a, e, &format!("epoch_of_next_negative_sample[{i}]"));
     }
@@ -225,10 +237,18 @@ fn node_embedding_e2e_n120() {
     let initial_alpha = as_f32(&inputs["initial_alpha"]);
     let negative_sample_rate = as_f32(&inputs["negative_sample_rate"]);
     let noise_level = as_f32(&inputs["noise_level"]);
-    let rng_val: Vec<u32> =
-        inputs["rng_val"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap() as u32).collect();
-    let node_order_shuffles: Vec<Vec<u32>> =
-        inputs["node_order_shuffles"].as_array().unwrap().iter().map(json_u32_vec).collect();
+    let rng_val: Vec<u32> = inputs["rng_val"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_u64().unwrap() as u32)
+        .collect();
+    let node_order_shuffles: Vec<Vec<u32>> = inputs["node_order_shuffles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(json_u32_vec)
+        .collect();
 
     assert!(inputs["reproducible_flag"].as_bool().unwrap());
 
