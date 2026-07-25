@@ -99,11 +99,72 @@ builds are much closer to each other (Rust modestly faster at n=800, Zig
 modestly faster at n=100/240 -- close enough to call a wash). In other
 words: the two ports are comparably fast as native code, but something
 about Rust's wasm32-unknown-unknown codegen/runtime path for this workload
-is markedly less efficient than Zig's wasm32-freestanding path. This
-project didn't dig into *why* (allocator differences, panic-machinery
-overhead, LLVM wasm backend codegen quality, `#[no_std]`-adjacent setup --
-several plausible causes, not investigated here); flagging it as the
-single most decision-relevant number in this report.
+is markedly less efficient than Zig's wasm32-freestanding path.
+
+**Follow-up investigation (2026-07-25): root cause not found among the
+likely suspects.** Five build-configuration hypotheses were tested,
+rebuilding `rust/core`'s wasm32-unknown-unknown release binary and
+re-running `scripts/wasm_benchmark.mjs` after each isolated change (each
+reverted before testing the next, so effects wouldn't compound):
+
+1. **`panic = "abort"` for the wasm target** (via
+   `rust/.cargo/config.toml` `[target.wasm32-unknown-unknown] rustflags`,
+   scoped so native `cargo test` keeps unwind semantics). Verified via
+   `cargo build -v` that `-C panic=abort` actually reached rustc. **Zero
+   effect** -- the output `.wasm` was byte-for-byte identical (same MD5) to
+   the `panic = "unwind"` default, and timings were within noise. Not
+   applied (no measurable benefit to justify the added build config).
+2. **`debug-assertions`/`overflow-checks`**: confirmed off, no override
+   anywhere for either target (`cargo build -v` shows no
+   `-C debug-assertions=true` / `-C overflow-checks=true`). Not the cause.
+3. **Allocator overhead**: swapped `wasm_api.rs`'s implicit default
+   allocator for a hand-rolled leaking bump allocator (`memory_grow`-backed,
+   never frees) behind an experimental feature flag, to isolate whether
+   `wasm32-unknown-unknown`'s default allocator was the bottleneck. Result:
+   **substantially worse**, not better (single-call timing roughly 5x
+   slower with the bump allocator than with the default allocator on the
+   same n=100 fixture). The default allocator is not the problem; the
+   experiment was reverted (not shipped).
+4. **Missing target features**: added `+bulk-memory,+sign-ext,
+   +mutable-globals,+nontrapping-fptoint` via the same `rustflags`
+   mechanism as (1) (Zig's `build.zig` sets no explicit wasm target
+   features either, so this was testing whether Rust's defaults are simply
+   more conservative). Verified the flags reached rustc. **Zero effect**
+   again -- byte-identical output binary, timings within noise. Not
+   applied.
+5. **LTO/codegen-units applying to the wasm target**: verified via
+   `cargo build -v` that `-C opt-level=3` and `-C codegen-units=1` do reach
+   rustc for the wasm build (so the workspace `[profile.release]` is
+   correctly applied per-target as expected). No explicit `-C lto=...` flag
+   appears in the rustc invocation for *either* the wasm or the native
+   build of `uvoc-core` -- but this is consistent with `uvoc-core` having
+   zero dependencies (LTO's main benefit, cross-crate inlining, is a no-op
+   for a single-crate compilation unit already at `codegen-units = 1`), and
+   it's identical between native and wasm, so it cannot explain the
+   *asymmetry* between them. Not investigated further.
+
+A sixth, unlisted variant was also tried opportunistically: switching
+`opt-level` from `3` to `"s"` (on the theory that V8's baseline Liftoff
+tier -- which dominates in a short 2-warmup/10-iteration benchmark -- might
+run smaller/simpler code faster than heavily inlined/unrolled `opt-level =
+3` code, even though the fully-optimized TurboFan tier would prefer `3`).
+This made things **worse** (roughly +15-20% slower across all three
+dataset sizes), ruling this out too.
+
+**None of the tested build-configuration levers explain the gap.** The
+overhead appears to be inherent to how LLVM's wasm32 backend (as invoked by
+rustc for this specific workload/code shape) codegens this program, rather
+than a fixable Cargo/rustflags misconfiguration -- consistent with, though
+not proof of, the "LLVM wasm backend codegen quality" possibility raised
+below. No Rust-side code or build changes were made as a result of this
+investigation (`rust/` is unchanged from before it started); flagging this
+as a real, currently-unexplained finding rather than forcing an
+unsubstantiated fix. Anyone picking this up next might look at: per-stage
+timing breakdown to localize *which* pipeline stage carries the overhead
+(this pass only had end-to-end numbers for the reasons noted above), disas-
+sembly/instruction-count comparison of a single hot function between the
+two `.wasm` binaries, or a profiler capable of attributing time inside a
+wasm module (`--prof`/`d8` tracing, or Node's `--cpu-prof`).
 
 ### Standalone stage: boruvka MST (n=80, d=4)
 
