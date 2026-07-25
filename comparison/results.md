@@ -914,3 +914,333 @@ prior recorded figures, confirming this investigation left no regression.)
 Artifact from this pass: `scripts/wasm_cold_warm_benchmark.mjs` (reusable,
 documented cold-vs-warm timing harness, `node
 scripts/wasm_cold_warm_benchmark.mjs`, no arguments).
+
+## Hot-path / per-stage analysis (2026-07-25)
+
+Prior per-stage numbers in this file ("Per-stage profiling" under "Scaling
+to 10k-30k points") were all **standalone** stage benchmarks -- each stage
+run in isolation, `node_embedding` in particular fed a synthetic k=15 graph
+rather than the real embedding-dimensioned graph the actual pipeline
+produces. Standalone `node_embedding` (2.55s at n=30000) was even *larger*
+than the real end-to-end total (2.08-2.78s), which is a giveaway that those
+numbers don't sum to, or represent shares of, the real pipeline. This pass
+adds a genuine **per-stage breakdown of the real `evoc_clusters` pipeline**,
+via a new throwaway `rust/core/tests/stage_bench.rs` (`cargo test --release
+-p uvoc-core --test stage_bench -- --ignored --nocapture`) that duplicates
+`evoc_clusters`'s body (`rust/core/src/clustering.rs`) with `Instant`
+wrapped around each real stage call, native (no wasm), reading
+`scripts/scale_data/scale_n{n}_d32.f32` (same generator/params as the
+existing scaling section). No sampling profiler (`perf`, `cargo
+flamegraph`) was used for the main breakdown -- `perf` is present on this
+machine but `cargo-flamegraph` is not installed and network access to
+install it wasn't available; coarse manual `Instant` timing around each of
+the six real pipeline calls gives an unambiguous per-stage split without
+needing either, and is the same style of tool already used elsewhere in
+this file (`native_bench.rs`).
+
+### Real per-stage breakdown, Rust native, release build
+
+| stage | n=2,000 | n=10,000 | n=30,000 | share at n=30,000 |
+|---|---|---|---|---|
+| normalize (row unit-norm) | 0.13 ms | 0.12 ms | 0.36 ms | <0.1% |
+| `knn_graph` (RP-forest + NN-descent) | 31.9 ms | 170-174 ms | 613-656 ms | **~45%** |
+| `neighbor_graph_matrix` (CSR build) | 3.3 ms | 15.8 ms | 53.1 ms | ~4% |
+| `label_propagation_init_recursive` | 10.0-10.3 ms | 69.4-69.7 ms | 301-307 ms | ~21% |
+| `node_embedding_repr_self_driven` (SGD) | 16.1-16.2 ms | 90.9-95.1 ms | 314-319 ms | ~22% |
+| `build_cluster_layers` (linkage/condense/EOM) | 6.1-6.3 ms | 31.8-33.6 ms | 119-122 ms | ~8% |
+| **total (sum of stages)** | ~68 ms | ~383-385 ms | ~1.41-1.44 s | 100% |
+
+(Three repeated runs per size; ranges reflect that noise band, not a
+regression. Params match the rest of this file's scaling section:
+`n_neighbors=15, min_samples=5, n_epochs=50, base_min_cluster_size=5,
+seed=0`.)
+
+**Headline correction to this file's earlier standalone-stage numbers:
+`knn_graph` -- not `node_embedding` -- is the dominant real-pipeline cost**,
+consistently ~45% of total time across all three sizes (2000/10000/30000),
+with `node_embedding` a clear second at ~22% and `label_propagation_init_
+recursive` close behind at ~21%. `build_cluster_layers` and `neighbor_
+graph_matrix` are minor (~8%/~4%). The proportions are stable across a 15x
+range in `n`, i.e. this isn't an artifact of one particular size. The
+"Threading feasibility" section's claim that `node_embedding`'s SGD is
+"the single largest contributor" and "the best threading target" was based
+on the standalone-synthetic-graph numbers and does not hold up against this
+real breakdown -- `knn_graph` is the actual largest contributor and, per
+that same section's own analysis, a *harder* threading target (NN-descent's
+candidate-refinement loop has real cross-iteration data dependencies). This
+doesn't overturn the "threading isn't the next lever to pull at today's
+~1-3s scale" conclusion, but it does correct *which* stage would be the
+right target if/when threading is revisited.
+
+### Algorithmic opportunities found (with file:line citations)
+
+Read `rust/core/src/knn_graph.rs`, `nndescent_float.rs`, `nnd_heap.rs`,
+`kdtree.rs`, `distance.rs` (the `knn_graph` call tree, since it's the
+dominant stage) plus `node_embedding.rs`, `label_propagation.rs`,
+`cluster_trees.rs` looking for unnecessary allocation/recomputation, missing
+pruning, and cache-unfriendly layout, per the task's checklist:
+
+**Category (a) -- safe, applied this pass:**
+
+- **`build_candidates` (`rust/core/src/nnd_heap.rs:170`) allocated four
+  fresh `Vec`s of size `n_vertices * max_candidates` on *every* NN-descent
+  round** (`nndescent_float.rs`'s `nn_descent_float` and `nn_descent_float_
+  sorted`, both call it once per `n_iters` round -- `n_iters` is
+  `max(5, round(log2(n)))`, e.g. 15 rounds at n=30000). At n=30000 with
+  `effective_max_candidates≈22`, that's ~10.5 MB of fresh allocation *per
+  round* (4 buffers x 30000 x 22 x 4 bytes), on top of the `dist_thresholds`
+  buffer (`nndescent_float.rs`, inside the per-block loop in both `nn_
+  descent_float` at the old line ~963 and `nn_descent_float_sorted` at the
+  old line ~1080) being rebuilt via a fresh `(0..n_samples).map(...).
+  collect()` on every block too. Given this file's own prior finding that
+  Rust wasm's dominant CPU cost is `__rdl_alloc_zeroed` (~87-88% of samples,
+  see "Cold-vs-warm wasm call investigation" above), repeated large
+  allocate/free churn inside `knn_graph`'s hottest loop was a natural
+  suspect. **Fix applied**: added `build_candidates_into` (`nnd_heap.rs`),
+  which takes the four buffers as `&mut` scratch parameters and resets them
+  to the exact same `-1`/`f32::INFINITY` initial values `vec![...]` would
+  have produced, so repeated calls are bit-identical to the old
+  allocate-fresh-every-call version; `build_candidates` itself is kept
+  as a thin allocating wrapper (unit tests / fixture tests call it
+  directly and still pass unchanged). Both `nn_descent_float` and `nn_
+  descent_float_sorted` now allocate these buffers (plus `dist_thresholds`)
+  **once** before the `n_iters` loop and reuse them every round. This is a
+  computation-order-preserving, values-preserving change -- every buffer is
+  fully overwritten before being read each round, so there is no
+  first-round-vs-later-round behavioral difference -- and is exactly the
+  kind of "arena/reused scratch buffer" change the task's instructions
+  called out as category (a).
+  - **Verification**: `cargo test --workspace` (all pass, including
+    `build_candidates_fixture`, `nn_descent_float_n150_d8_k10`, and `nn_
+    descent_float_sorted_n150_d8_k10` -- the exact bit-exact fixture tests
+    that would catch a value or order regression in this code path),
+    `zig build test` (untouched, passes), `node
+    scripts/wasm_fixture_runner.mjs` (rust 10/10 pass 0 fail, zig 9/10 pass
+    1 skip -- unchanged from before this pass), `bash scripts/check_all.sh`
+    (passes end to end).
+  - **Measured effect**: real but small. Native release build,
+    `stage_bench`'s `knn_graph` row, 3 runs each side: **before 645-656 ms,
+    after 612-615 ms at n=30000** (non-overlapping ranges, ~5% faster,
+    reproducible across repeated runs both ways). At n=2000/10000 the
+    effect was within noise (native allocator is fast enough at those
+    sizes that the win doesn't clear the noise floor). **Wasm**: NOT
+    reproducible -- `scripts/wasm_scale_benchmark.mjs` end-to-end
+    `wasm_evoc_fit_predict` at n=10000 measured 739-763 ms *before* this
+    change and 737-750 ms *after*, fully overlapping, no measurable
+    difference (an earlier single sample that looked like a 14% win at
+    n=10000, 646 ms, turned out to be a one-off outlier once repeated 3x
+    each way). **Kept anyway**: the native win is real, reproducible, and
+    free (same allocation-safety category the task pre-authorized, zero
+    behavior risk, verified bit-exact) even though it did not resolve the
+    wasm-specific `alloc_zeroed` cost documented earlier in this file --
+    that cost is evidently dominated by something else (most likely the
+    RP-tree's and NN-descent's *other* allocations -- e.g. `make_float_
+    tree`'s recursive `indices.to_vec()`/`temp_left`/`temp_right` per split,
+    `nndescent_float.rs:59` `hyperplane_vector`, or the leaf-array
+    stacking in `knn_graph.rs:46` -- rather than this specific hot loop's
+    buffers) that this pass did not additionally track down. Flagged as
+    remaining future work, not chased further this pass given the modest
+    stakes (native win already banked, wasm gap unaffected either way).
+
+**Category (b) -- would require touching bit-exact-parity computation
+order, NOT implemented, documented only:**
+
+- **`float_random_projection_split` (`nndescent_float.rs:38`) allocates a
+  fresh `hyperplane_vector` (`Vec<f32>`, size `n_features`) plus `temp_left`/
+  `temp_right` (each size `indices.len()`) on every RP-tree split node**,
+  and `make_float_tree` (`nndescent_float.rs:143`) recurses with
+  `indices.to_vec()`-copied slices rather than in-place partitioning of a
+  shared index buffer. A quicksort-style in-place partition (like a
+  standard kd-tree build) would avoid most of this churn. **Not applied**:
+  the RP-tree's split/traversal order is part of the bit-exact contract
+  (leaf assignment determines NN-descent's initial candidate set, which
+  determines the whole graph), and an in-place partition changes the
+  *order* in which points are visited/copied even if the final left/right
+  partition sets are the same set-wise -- given this project's PORTING.md
+  numeric-parity policy and its own extensive prior history of caution
+  around exactly this class of change (see PCA_VALIDATION.md), this was
+  left as a documented opportunity rather than attempted blind.
+- **`generate_graph_update_array_float`/`generate_sorted_graph_update_
+  array_float` (`nndescent_float.rs`, the `O(n * max_candidates^2)` distance
+  loop inside each NN-descent round) recomputes `fast_cosine` for every
+  candidate pair with no cross-round memoization** -- e.g. a pair examined
+  in round `k` that survives into round `k+1`'s candidate set is
+  re-distanced from scratch. A distance cache keyed by point-pair would cut
+  redundant work, but changing *what* gets recomputed changes the
+  termination behavior of the whole iterative process (which pairs get
+  accepted/rejected in which round depends on exactly this recomputation),
+  so this is squarely category (b) -- not attempted.
+- **Array-of-structs vs struct-of-arrays**: `data` is already flat row-major
+  `f32` (a natural SoA-ish layout for this access pattern -- `data_row`
+  (`nndescent_float.rs:29`) just slices contiguous memory), so this
+  particular AoS/SoA lever doesn't apply here; the existing layout is
+  already cache-friendly for the per-row dot products `fast_cosine`
+  performs. No change recommended.
+- **`kdtree.rs`'s Boruvka-supporting kd-tree query path** was not
+  independently re-profiled this pass (Boruvka runs on the low-dimensional
+  post-embedding output in the real pipeline, where it's already cheap per
+  this file's "Standalone stage: boruvka MST" and the scaling section's
+  caveat about the standalone d=32 numbers not being representative) --
+  no action taken, matches this file's existing guidance.
+
+### Not pursued this pass
+
+Zig's `knn_graph.zig`/`nndescent_float.zig` were not independently
+per-stage-profiled (no Zig equivalent of the new `stage_bench.rs` was
+written) -- PORTING.md requires the same algorithm/iteration order in both
+languages, so the *algorithmic* findings above (knn_graph dominance,
+build_candidates allocation churn, RP-tree copy churn) almost certainly
+transfer, but the *measured* effect sizes above are Rust-only. A follow-up
+could port `stage_bench.rs`'s approach to a `zig run` throwaway harness
+(same pattern as `zig/src/native_bench.zig`) to confirm the Zig numbers
+match in shape.
+
+Artifact from this pass: `rust/core/tests/stage_bench.rs` (throwaway,
+`#[ignore]`d per-stage native timing harness, kept in the tree per this
+file's established convention of not deleting reusable benchmark
+harnesses).
+
+## Python reference: time and memory (2026-07-25)
+
+Fills the gap this file's "Execution time" section explicitly left blank
+("Python (numba, native) numbers were not re-measured in this pass... left
+blank"). Prior Python work in this project (PCA_VALIDATION.md,
+`scripts/measure_python_null.py`) is all *correctness* (ARI) validation --
+this is the first *performance* number for the actual Python reference this
+whole port is validated against.
+
+### Setup
+
+Reused the venv path recorded in prior investigations,
+`/wrk/claw-scratch/uvoc-wasm/pyenv` + `/wrk/claw-scratch/uvoc-wasm/evoc-
+reference` (a checkout of `TutteInstitute/evoc`, the same reference
+PORTING.md points at) -- both existed but the venv's `python` symlinks were
+broken (pointed at a `uv`-managed interpreter path from a different
+session/machine). Rebuilt cleanly: `uv venv --python 3.12 pyenv`, `uv pip
+install --python pyenv numpy scipy scikit-learn numba tqdm`, `uv pip install
+--python pyenv -e evoc-reference` -- all succeeded without incident
+(numpy 2.4.6, numba 0.66.0, scipy 1.18.0, scikit-learn 1.9.0).
+
+### Method
+
+New script `scripts/benchmark_python_reference.py` (committed, reusable).
+For each size, runs in a **fresh subprocess** (`python -c "..."`, one per
+size) so one size's numba JIT compile can't warm a later size's cache,
+timing:
+
+- **cold**: the *first* `evoc.EVoC(random_state=0).fit_predict(X)` call in
+  that fresh process.
+- **warm**: 1-3 further calls (same process, same import), median/min/max
+  reported.
+- **peak memory**: `resource.getrusage(resource.RUSAGE_SELF).ru_maxrss`
+  read at the end of the subprocess (Linux: peak RSS in KiB over the whole
+  process lifetime -- import + JIT + all calls).
+
+Datasets: n=100/240/800 use the **exact fixture data** already used for
+this file's Rust/Zig native+wasm "Execution time" table (`fixtures/
+clustering/panel_small_balanced.json` d=12, `evoc_clusters_e2e_ari_check.
+json` d=24, `panel_large_many_clusters.json` d=32) for a true apples-to-
+apples comparison; n=2000/10000/30000 regenerate the same cosine-friendly
+orthogonal-axis-centers construction as `scripts/gen_scale_test_data.py`
+(d=32, 8 clusters, seed=1234) inline, so this script has no dependency on
+the gitignored `scripts/scale_data/*.f32` blobs existing first. This
+machine has 24 cores; numba's default `NUMBA_NUM_THREADS=24`, and `evoc`'s
+kernels use `@njit(parallel=True)` with `prange` -- **unlike the Rust/Zig
+ports, which are single-threaded by construction** (PORTING.md: every
+`prange` becomes a plain sequential loop) -- so the numbers below reflect
+"what you actually get running the reference on this machine," not a
+controlled single-thread-vs-single-thread comparison. This is flagged
+explicitly rather than treated as a fair "Python is faster than Rust"
+claim.
+
+A critical realistic-cold-start subtlety was checked directly: this
+checkout's `evoc/__pycache__/*.nbi` numba disk-cache files (from prior
+work in this same checkout) mean a "fresh process" cold run is really
+*fresh process, warm on-disk JIT cache* -- still faster than a genuine
+never-compiled-before run. This was verified by temporarily deleting
+`evoc-reference/evoc/__pycache__` and re-timing n=100's cold run: **true
+from-scratch JIT compilation takes ~12.1 seconds** (vs ~120 ms with the
+disk cache warm) and peak RSS balloons to ~964 MiB during compilation (LLVM
+codegen inside numba, not algorithm memory) vs ~280 MiB with the disk
+cache warm. The cache was restored immediately after this one measurement
+and all other numbers below use the (realistic, "this package has been
+imported at least once before on this machine") warm-disk-cache cold
+number. Both numbers are reported below since they answer different
+questions ("first import ever" vs "first call in this process, package
+previously used").
+
+### Results
+
+| n | Python cold (disk-cache warm) | Python warm (median) | Python peak RSS |
+|---|---|---|---|
+| 100    | 117.3-122.2 ms | 22.4-24.5 ms  | 280-288 MiB |
+| 240    | 110.4 ms       | 30.4 ms       | 281 MiB |
+| 800    | 127.6 ms       | 32.2 ms       | 285 MiB |
+| 2,000  | 142.6 ms       | 69.0 ms       | 288-295 MiB |
+| 10,000 | 377.7 ms       | 250.2 ms      | 303-310 MiB |
+| 30,000 | 770.9 ms       | 677.2 ms      | 334-342 MiB |
+
+True from-scratch (never-before-compiled) cold run, measured once at n=100
+only (see Method): **~12.1 s**, peak RSS **~964 MiB**.
+
+### Combined table: Python vs native Rust/Zig vs wasm Rust/Zig
+
+All entries are median/typical values, ms unless noted; Python "warm" is
+the fairest peer to the Rust/Zig "native" columns (JIT already compiled,
+same process). `n/a` = not measured at that size in the corresponding
+section of this file.
+
+| n | Python warm | Rust native | Zig native | Rust wasm | Zig wasm |
+|---|---|---|---|---|---|
+| 100    | 22.4-24.5 ms | 3.32 ms  | 4.82 ms  | 36.64 ms (or 37.02 ms) | 4.39-4.48 ms |
+| 240    | 30.4 ms      | 7.66 ms  | 9.62 ms  | 41.56-42.64 ms         | 10.82-11.03 ms |
+| 800    | 32.2 ms      | 24.85 ms | 27.24 ms | 63.61-68.05 ms         | 32.78-34.28 ms |
+| 2,000  | 69.0 ms      | ~68 ms (`stage_bench` sum, this pass) | n/a | 248-256 ms | 139.4 ms |
+| 10,000 | 250.2 ms     | ~383-385 ms (`stage_bench` sum, this pass) | n/a | 737-763 ms | 651.7-657.8 ms |
+| 30,000 | 677.2 ms     | ~1.41-1.44 s (`stage_bench` sum, this pass) | n/a | 2.08-2.78 s | 1.98-1.99 s |
+
+### What this says
+
+- **At small n (100-800), Python is 4-7x SLOWER than Rust/Zig native**, but
+  still 1.1-1.9x *faster* than either language's **wasm** build at the same
+  sizes -- the wasm overhead documented earlier in this file (cold
+  instantiation cost, allocator behavior) is large enough at small n that
+  even a Python interpreter with a JIT-compiled numba backend beats it.
+- **At large n (2,000-30,000), the picture flips: Python's *parallel*
+  numba kernels (24 threads) become competitive with, and at 30000
+  noticeably faster than, the single-threaded Rust/Zig ports** (677 ms
+  Python vs ~1.4 s Rust native at n=30000 -- roughly 2x). This is NOT a
+  single-thread-vs-single-thread comparison (see Method's caveat) -- it's
+  what a user actually gets running `pip install evoc` vs this project's
+  single-threaded ports on this specific 24-core machine, and the gap would
+  very likely close or reverse on a single-core-constrained target (e.g. a
+  browser tab, this project's actual deployment target for the wasm
+  builds) where numba's `parallel=True` has nothing to parallelize across.
+- **Memory: Python's baseline is higher (~280 MiB) than Rust/Zig wasm's
+  *initial* footprint but grows much more slowly with n** (280 -> 342 MiB,
+  a 1.2x increase for a 300x increase in n from 100 to 30000) than either
+  wasm build (Rust wasm: 539 -> 562 MiB, ~1.04x for 15x n from 2000-30000;
+  Zig wasm: 1031 -> 1123 MiB, ~1.09x). Python's ~280 MiB baseline (numpy +
+  scipy + scikit-learn + numba/llvmlite all resident) is the classic
+  "heavier baseline, flatter growth" shape expected of a dependency-rich
+  interpreted stack, vs the "smaller baseline, same shape" the Rust/Zig
+  wasm builds show (both already noted in this file as apparently
+  n-independent constant overhead, not scaling risk). These numbers are not
+  directly comparable measurement-for-measurement (process peak RSS vs.
+  wasm linear-memory high-water-mark are different things measured
+  differently), so treat this as an order-of-magnitude read, not a precise
+  ratio: Python's peak RSS and Rust wasm's peak linear memory are within
+  ~2x of each other throughout, both clearly smaller than Zig wasm's.
+- **JIT compilation cost is a real, one-time tax specific to Python**: ~12
+  seconds and ~1 GiB of RAM the very first time `evoc` is imported and
+  called on a machine (before its numba disk cache exists), vs
+  single-digit-to-low-hundreds-of-ms for every Rust/Zig call (native or
+  wasm) since there's no JIT step at all. This is invisible in most
+  benchmarking (including the "cold" numbers in the table above, which
+  benefit from this checkout's pre-existing disk cache) but is a genuine
+  first-run cost for a fresh Python environment/CI job/container.
+
+Artifact from this pass: `scripts/benchmark_python_reference.py` (reusable,
+documented; usage: `<venv>/bin/python
+scripts/benchmark_python_reference.py [n1,n2,...]`, defaults to
+100,240,800,2000,10000,30000).
