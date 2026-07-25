@@ -19,3 +19,5 @@ pub mod nndescent_float;
 pub mod node_embedding;
 pub mod pca;
 pub mod rng;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_api;

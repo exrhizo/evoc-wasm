@@ -5,6 +5,12 @@ edition = "2021"
 license = "BSD-2-Clause"
 description = "From-scratch Rust port of TutteInstitute/evoc clustering (EVoC), wasm32-friendly core"
 
+[lib]
+# cdylib so wasm32-unknown-unknown produces a standalone .wasm with our
+# extern "C" exports (see src/wasm_api.rs); rlib kept so native `cargo test`
+# / other workspace crates can still depend on this as a normal Rust lib.
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 # Intentionally empty: the core must stay dependency-free for lean wasm builds.
 
