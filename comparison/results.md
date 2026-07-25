@@ -1169,7 +1169,7 @@ number. Both numbers are reported below since they answer different
 questions ("first import ever" vs "first call in this process, package
 previously used").
 
-### Results
+### Results (original: default, unconstrained 24-thread numba -- NOT a fair comparison, see correction below)
 
 | n | Python cold (disk-cache warm) | Python warm (median) | Python peak RSS |
 |---|---|---|---|
@@ -1183,14 +1183,84 @@ previously used").
 True from-scratch (never-before-compiled) cold run, measured once at n=100
 only (see Method): **~12.1 s**, peak RSS **~964 MiB**.
 
-### Combined table: Python vs native Rust/Zig vs wasm Rust/Zig
+### Correction (2026-07-25): single-threaded re-run for a fair comparison
+
+The numbers immediately above were measured **without constraining thread
+count**, so numba's JIT-compiled `parallel=True`/`prange` kernels (and
+possibly BLAS calls underneath scikit-learn's PCA step) were free to use
+all 24 cores on this machine. That makes the "Python vs Rust/Zig" numbers
+above an apples-to-oranges comparison: the Rust/Zig ports are
+**deliberately single-threaded by construction** (PORTING.md: every
+`prange` becomes a plain sequential loop), so a multi-threaded Python
+reference was never a fair peer for them, and the earlier "~2x faster than
+Rust native at n=30000" conclusion below was an artifact of thread count,
+not per-thread algorithmic efficiency.
+
+Re-ran the exact same script (`scripts/benchmark_python_reference.py`, same
+sizes, same fixtures/generator, same methodology: subprocess-per-size,
+cold = first call, warm = median of further calls, peak RSS via
+`ru_maxrss`) with all thread-count env vars pinned to 1 before launching
+Python: `NUMBA_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1`. `evoc.EVoC` has no explicit
+`n_jobs`/`num_threads` constructor parameter of its own -- its njit kernels
+call `numba.get_num_threads()` directly (`evoc/clustering.py:100,370`), so
+the env var is the actual and only control point; there is no belt-and-
+suspenders explicit-API call layered on top because none exists.
+
+Constraint verified two ways before trusting the numbers: (1)
+`NUMBA_NUM_THREADS=1 ... python -c "import numba;
+print(numba.get_num_threads())"` printed `1` inside the constrained
+process; (2) `/usr/bin/time -v` on the full n=30000 run reported
+**"Percent of CPU this job got: 99%"** (vs the ~2000%+ a 24-thread run
+would show), confirming genuinely single-threaded execution, not just an
+env var that numba silently ignored.
+
+#### Results (single-threaded, fair comparison)
+
+| n | Python cold (disk-cache warm) | Python warm (median) | Python peak RSS |
+|---|---|---|---|
+| 100    | 86.5 ms   | 7.7 ms   | 277 MiB |
+| 240    | 92.3 ms   | 12.8 ms  | 277 MiB |
+| 800    | 122.7 ms  | 34.5 ms  | 282 MiB |
+| 2,000  | 170.3 ms  | 84.3 ms  | 283 MiB |
+| 10,000 | 528.1 ms  | 465.0 ms | 300 MiB |
+| 30,000 | 1883.9 ms | 1796.2 ms | 336 MiB |
+
+(Single subprocess per size, median of 3 warm calls for n<=2000, 1 warm
+call for n=10000/30000, same as the original methodology.)
+
+Note the small-n numbers actually got *faster* under the single-threaded
+constraint (e.g. n=100 warm: 22.4-24.5 ms multi-threaded -> 7.7 ms
+single-threaded) -- at small n, numba's thread-pool dispatch/join overhead
+across 24 threads costs more than the parallel work saves, so forcing 1
+thread removes pure overhead with no compensating loss. This flips only at
+larger n, where there's enough work per kernel call for parallelism to pay
+for its own overhead.
+
+### Combined table: Python (single-threaded, fair) vs native Rust/Zig vs wasm Rust/Zig
 
 All entries are median/typical values, ms unless noted; Python "warm" is
 the fairest peer to the Rust/Zig "native" columns (JIT already compiled,
-same process). `n/a` = not measured at that size in the corresponding
-section of this file.
+same process, and now both sides single-threaded). `n/a` = not measured at
+that size in the corresponding section of this file.
 
-| n | Python warm | Rust native | Zig native | Rust wasm | Zig wasm |
+| n | Python warm (1 thread) | Rust native | Zig native | Rust wasm | Zig wasm |
+|---|---|---|---|---|---|
+| 100    | 7.7 ms   | 3.32 ms  | 4.82 ms  | 36.64 ms (or 37.02 ms) | 4.39-4.48 ms |
+| 240    | 12.8 ms  | 7.66 ms  | 9.62 ms  | 41.56-42.64 ms         | 10.82-11.03 ms |
+| 800    | 34.5 ms  | 24.85 ms | 27.24 ms | 63.61-68.05 ms         | 32.78-34.28 ms |
+| 2,000  | 84.3 ms  | ~68 ms (`stage_bench` sum, this pass) | n/a | 248-256 ms | 139.4 ms |
+| 10,000 | 465.0 ms | ~383-385 ms (`stage_bench` sum, this pass) | n/a | 737-763 ms | 651.7-657.8 ms |
+| 30,000 | 1796.2 ms | ~1.41-1.44 s (`stage_bench` sum, this pass) | n/a | 2.08-2.78 s | 1.98-1.99 s |
+
+### Combined table (reference only): Python default/24-thread numba -- NOT a fair comparison
+
+Kept for reference since it's what a `pip install evoc` user actually
+experiences on a 24-core machine, but it is **not** informative about
+per-thread/algorithmic efficiency versus the single-threaded Rust/Zig
+ports -- see correction above.
+
+| n | Python warm (24 threads, default) | Rust native | Zig native | Rust wasm | Zig wasm |
 |---|---|---|---|---|---|
 | 100    | 22.4-24.5 ms | 3.32 ms  | 4.82 ms  | 36.64 ms (or 37.02 ms) | 4.39-4.48 ms |
 | 240    | 30.4 ms      | 7.66 ms  | 9.62 ms  | 41.56-42.64 ms         | 10.82-11.03 ms |
@@ -1199,23 +1269,40 @@ section of this file.
 | 10,000 | 250.2 ms     | ~383-385 ms (`stage_bench` sum, this pass) | n/a | 737-763 ms | 651.7-657.8 ms |
 | 30,000 | 677.2 ms     | ~1.41-1.44 s (`stage_bench` sum, this pass) | n/a | 2.08-2.78 s | 1.98-1.99 s |
 
-### What this says
+### What this says (corrected, single-threaded-vs-single-threaded picture)
 
-- **At small n (100-800), Python is 4-7x SLOWER than Rust/Zig native**, but
-  still 1.1-1.9x *faster* than either language's **wasm** build at the same
-  sizes -- the wasm overhead documented earlier in this file (cold
-  instantiation cost, allocator behavior) is large enough at small n that
-  even a Python interpreter with a JIT-compiled numba backend beats it.
-- **At large n (2,000-30,000), the picture flips: Python's *parallel*
-  numba kernels (24 threads) become competitive with, and at 30000
-  noticeably faster than, the single-threaded Rust/Zig ports** (677 ms
-  Python vs ~1.4 s Rust native at n=30000 -- roughly 2x). This is NOT a
-  single-thread-vs-single-thread comparison (see Method's caveat) -- it's
-  what a user actually gets running `pip install evoc` vs this project's
-  single-threaded ports on this specific 24-core machine, and the gap would
-  very likely close or reverse on a single-core-constrained target (e.g. a
-  browser tab, this project's actual deployment target for the wasm
-  builds) where numba's `parallel=True` has nothing to parallelize across.
+- **At every tested size (100-30,000), single-threaded Python is SLOWER
+  than single-threaded Rust native** -- 1.2x-2.3x slower, not faster. The
+  gap is largest at small n (100: Python 7.7 ms vs Rust 3.32 ms, ~2.3x) and
+  narrows steadily as n grows (30,000: Python 1796 ms vs Rust ~1.41-1.44 s,
+  ~1.25x) -- consistent with a genuine per-call/interpreter-dispatch
+  overhead that shrinks in relative terms as the algorithmic work per call
+  grows, rather than any per-thread inefficiency in numba's kernels.
+- **The old "Python ~2x faster than Rust native at n=30000" conclusion
+  (677 ms vs ~1.4 s) was purely a thread-count artifact**: numba had 24
+  cores to spread `parallel=True` kernels across while the Rust/Zig ports
+  used exactly 1 by construction. With both sides pinned to 1 thread, the
+  ordering reverses: Rust native is ~1.25x *faster* than Python at
+  n=30000, and faster at every other size too. This corrects an
+  apples-to-oranges comparison; it is not a regression in Rust/Zig or in
+  Python -- both numbers above (24-thread and 1-thread) are accurate
+  measurements of different, clearly-labeled configurations.
+- **At small n (100-800), Python is still meaningfully faster than
+  Rust/Zig's wasm builds** even single-threaded (e.g. n=100: Python 7.7 ms
+  vs Rust wasm 36.64 ms) -- wasm's cold-instantiation overhead dominates at
+  this scale regardless of what native/interpreted baseline it's compared
+  against.
+- **Single-threading changed small-n Python for the better, not the
+  worse**: thread-pool dispatch overhead across 24 threads was pure tax at
+  n<=800 with no parallel work large enough to amortize it, so removing it
+  made those calls 2-3x faster, not slower. The slowdown from
+  single-threading only shows up (and only partially -- Python is still
+  slower than Rust at every size) once n is large enough that the original
+  24-thread run had genuine parallel speedup to lose.
+- **Memory is materially unaffected by thread count** (277-336 MiB
+  single-threaded vs 280-342 MiB multi-threaded across the same n range --
+  within measurement noise), as expected: `ru_maxrss` reflects data +
+  interpreter/JIT footprint, not thread-pool stack memory at these sizes.
 - **Memory: Python's baseline is higher (~280 MiB) than Rust/Zig wasm's
   *initial* footprint but grows much more slowly with n** (280 -> 342 MiB,
   a 1.2x increase for a 300x increase in n from 100 to 30000) than either
