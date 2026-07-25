@@ -49,4 +49,24 @@ pub fn build(b: *std.Build) void {
     const wasm_install = b.addInstallArtifact(wasm_lib, .{});
     const wasm_step = b.step("wasm", "Build wasm32-freestanding uvoc_core.wasm");
     wasm_step.dependOn(&wasm_install.step);
+
+    // ---------------------------------------------------------------------
+    // PROTOTYPE, additive/opt-in: separate wasm artifact for the threaded
+    // RP-tree prototype (see wasm_api_rp_tree_proto.zig and
+    // comparison/results.md's "Threaded RP-tree prototype" section). Built
+    // by a dedicated `zig build wasm-rp-tree-proto` step only -- does not
+    // touch the `wasm` step or `uvoc_core.wasm` above in any way.
+    // ---------------------------------------------------------------------
+    const rp_tree_proto_lib = b.addExecutable(.{
+        .name = "uvoc_rp_tree_proto",
+        .root_source_file = b.path("src/wasm_api_rp_tree_proto.zig"),
+        .target = wasm_target,
+        .optimize = wasm_optimize,
+    });
+    rp_tree_proto_lib.entry = .disabled;
+    rp_tree_proto_lib.rdynamic = true;
+
+    const rp_tree_proto_install = b.addInstallArtifact(rp_tree_proto_lib, .{});
+    const rp_tree_proto_step = b.step("wasm-rp-tree-proto", "PROTOTYPE: build uvoc_rp_tree_proto.wasm (threaded RP-tree prototype, single-tree-build entry point)");
+    rp_tree_proto_step.dependOn(&rp_tree_proto_install.step);
 }

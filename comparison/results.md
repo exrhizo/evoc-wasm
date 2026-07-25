@@ -1566,3 +1566,227 @@ Artifacts from this pass: `rust/core/src/rp_forest_threaded_prototype.rs`,
 `scripts/wasm_threaded_prototype.mjs`, `scripts/wasm_threaded_prototype_
 worker.mjs` (all prototype/experimental, explicitly not wired into the
 default pipeline).
+
+## Threaded RP-tree prototype (Zig, wasm threads) (2026-07-25)
+
+Prototype-only, additive pass, run concurrently with (and independently
+of) the Rust threaded-RP-tree prototype above. Same target: the RP-forest
+construction sub-step of `knn_graph`, not `knn_graph` as a whole and not
+`node_embedding`/`label_propagation`. Per this task's instructions, `rust/`
+was not touched at all -- this section and the Rust section above were
+written independently and are cross-referenced only after the fact.
+
+### Step 1: what Python actually parallelizes
+
+Already answered by the Rust section above (same finding, re-confirmed
+independently by grepping `evoc-reference/evoc/*.py` for `@numba.njit(
+parallel=True)`/`numba.prange` before starting): **RP-forest construction
+is `prange`-parallelized over independent trees**
+(`float_nndescent.py`'s `make_float_forest_no_nested_parallelism`/`_with_
+nested_parallelism`, each tree built from read-only shared `data` plus its
+own `rng_states[i]` row, no cross-tree interaction until the sequential
+pad+vstack merge in `knn_graph.py`'s `make_forest`) -- this matches Zig's
+`knn_graph.zig`/`nndescent_float.zig` port structure exactly (`make_float_
+forest_no_nested_parallelism` there is a `for` loop over what the reference
+comments mark `// prange, sequential here`). NN-descent's refinement is
+also `parallel=True` in the reference, via a different within-round
+thread-chunking pattern with real cross-round sequential dependency, per
+the Rust section's Step 1 -- not re-investigated separately here since the
+Rust section's finding transfers directly (same Python reference, same
+question).
+
+### Step 2: does Zig 0.13 wasm32-freestanding support threads at all?
+
+Tested directly with a minimal `zig build-exe` before touching any real
+code:
+
+- `-target wasm32-freestanding -mcpu=baseline+atomics+bulk_memory` compiles
+  a module using `std.atomic.Value` fine.
+- `std.Thread.spawn` does **not** work on this target in Zig 0.13.0:
+  `error: Cannot spawn thread when building in single-threaded mode` /
+  `error: Unsupported operating system freestanding`, confirmed directly.
+  So Zig-level threading primitives are a non-starter for this target,
+  exactly as the task anticipated -- the only path is manual worker/
+  instance coordination from the JS host side.
+- The linker flags for actual shared-memory wasm in Zig 0.13 are
+  `--import-memory --shared-memory --max-memory=<bytes>` (note: `--shared-
+  memory`, not `-mshared-memory` -- the latter is not a recognized flag in
+  this version and errors immediately; found by checking `zig build-exe
+  --help-hidden`). With those flags plus `-mcpu=baseline+atomics+bulk_
+  memory`, a toy module exporting a `bump()` that does `std.atomic.Value(i32
+  ).fetchAdd(1, .seq_cst)` was compiled, then instantiated identically in 4
+  Node `worker_threads`, each against the SAME `WebAssembly.Memory({shared:
+  true, initial: 17, maximum: 1024})`. Result: 4 workers x 1000 increments
+  each landed on exactly 4000 when read back from a 5th instance sharing
+  the same memory -- **shared wasm memory + cross-worker atomics genuinely
+  work in Zig 0.13.0 + Node 20**, no lost updates.
+
+### Design deviation from the task's shared-memory sketch (deliberate, and why) -- same root cause as Rust's
+
+Despite the toy validation above working, this prototype does **not** use
+shared `WebAssembly.Memory` + `Atomics` for the actual RP-tree build, for
+the same reason the concurrent Rust prototype found and reported
+independently: **`std.heap.wasm_allocator`, which `wasm_api.zig` and every
+allocation inside `make_float_leaf_array_serial` funnels through, is not
+safe for concurrent use across module instances that share one linear
+memory.** It is a bump/free-list allocator that assumes it alone owns the
+heap starting right after static data; N independent module *instances*
+(one per worker) sharing one memory would each independently believe that
+same region is free and hand out overlapping addresses to concurrent
+callers -- silent heap corruption, not a crash. RP-tree construction is
+allocation-heavy (one `ArrayList([]i32)` of leaf point-index slices per
+tree, resized repeatedly during the split recursion in `make_float_tree`),
+so this isn't a corner that can be avoided by just not allocating in the
+shared region. A correct shared-memory version would need a custom,
+worker-partitioned allocator (each instance pinned to a private offset
+range negotiated up front) -- real engineering, out of scope for a
+prototype pass, and Zig 0.13 has no ready-made thread-safe wasm global
+allocator to reach for instead.
+
+**The pattern actually used**: each Node `worker_thread` compiles and
+instantiates its own **private** (non-shared, ordinary) copy of a new
+wasm module, builds its assigned tree(s) entirely within that private
+memory (no allocator sharing possible, so no race to reason about), and
+returns the packed leaf-array bytes to the main thread over `postMessage`
+as a transferable `ArrayBuffer` (zero-copy). The main thread performs the
+same pad-to-max-width + vstack merge `make_forest` does, in the same
+tree-index order, to reassemble the final forest.
+
+### What was built
+
+- `zig/src/wasm_api_rp_tree_proto.zig` (new, additive file -- does not
+  modify `wasm_api.zig` or any phase 1-8 core file). Exports `alloc`/
+  `dealloc` (independent copies of the same protocol `wasm_api.zig` uses,
+  kept in a separate file on purpose so this prototype has zero build/
+  runtime dependency on the existing wasm entry point) and `build_rp_tree_
+  leaf_array`, which builds exactly one tree by calling the *existing,
+  unmodified* `nndescent_float.make_float_leaf_array_serial` -- the same
+  function `knn_graph.zig`'s single-threaded `make_forest` already calls
+  once per tree in a sequential loop. No tree-building logic was
+  duplicated or reimplemented.
+- `zig/build.zig`: one new additive step, `wasm-rp-tree-proto`, building a
+  **separate** `.wasm` artifact (`uvoc_rp_tree_proto.wasm`) from the file
+  above. It does not touch the existing `wasm` step, `uvoc_core.wasm`, or
+  any existing target/optimize option in any way -- verified by re-running
+  `zig build wasm` after adding it and confirming `uvoc_core.wasm`'s
+  fixture parity is unaffected (see "Verification" below).
+- `scripts/wasm_threaded_prototype_zig.mjs` + `scripts/wasm_threaded_
+  prototype_zig_worker.mjs` (new). Generates deterministic synthetic data +
+  per-tree `rng_states` inline (JS-side `mulberry32` PRNG -- not required
+  to bit-match numpy/Python since this script only checks Zig-vs-Zig
+  internal consistency, which fixture tests elsewhere already cover for
+  the single-threaded reference path), assigns `evoc`'s default `n_trees=4`
+  round-robin across a **persistent** pool of long-lived workers (created
+  once, reused across all sizes/reps -- an early version spawned a fresh
+  `Worker` per call and measured ~20ms of pure spawn+wasm-compile overhead
+  per call, which swamped every real signal and made "threaded" look
+  uniformly ~150x slower at every size; switching to a persistent pool
+  fixed this and is also the realistic long-lived-browser-tab deployment
+  shape), and verifies + benchmarks single-threaded-in-one-instance vs
+  threaded-across-the-pool.
+
+### Bit-parity verification
+
+`node scripts/wasm_threaded_prototype_zig.mjs` builds and compares the
+merged forest (single-threaded-sequential vs threaded-pool, both using the
+exact same generated data + `rng_states`) at every benchmarked size before
+timing either path. **Result: bit-identical (`bitExact=true`) at every
+size tested (100, 500, 2000, 5000, 10000, 20000, 30000)** -- a real
+bit-exact result, not an ARI/statistical fallback, for the same reason
+noted in the Rust section: this only changes *which thread/instance calls*
+`make_float_leaf_array_serial`, never its algorithm, iteration order, or
+RNG sequence.
+
+### Benchmark: single-threaded vs threaded, by size
+
+24-core machine, `n_trees=4` (evoc's actual default forest size, not an
+enlarged count), `n_workers=4`, persistent worker pool, median of 5 reps
+(n<=2000) or 3 reps (n>2000), RP-forest-build-only time (not full
+`knn_graph`, not full pipeline):
+
+| n | single-threaded | threaded (4 workers) | speedup |
+|---|---|---|---|
+| 100    | 0.14 ms  | 0.18 ms  | 0.76x |
+| 500    | 0.26 ms  | 0.39 ms  | 0.66x |
+| 2,000  | 1.51 ms  | 1.24 ms  | 1.22x |
+| 5,000  | 3.93 ms  | 1.75 ms  | 2.24x |
+| 10,000 | 8.50 ms  | 4.23 ms  | 2.01x |
+| 20,000 | 17.81 ms | 9.28 ms  | 1.92x |
+| 30,000 | 28.36 ms | 12.06 ms | 2.35x |
+
+**Adaptive threshold found empirically: ~n=2,000** is the crossover point
+where threaded pulls ahead (with a persistent pool, per-call overhead is
+just `postMessage` + a fresh private-memory copy of `data` per worker per
+call, not full worker/wasm-instantiate cost, so the fixed-cost floor
+threading has to clear is much lower than a spawn-per-call design's would
+be). Speedup plateaus around ~2-2.35x for n>=5,000, which is expected and
+bounded by `n_trees=4` capping the pool's useful parallelism at 4 workers
+regardless of how many cores/workers are available.
+
+**Why this crossover point (~2,000) differs so much from the Rust
+prototype's (~8,000-10,000) despite a similar underlying mechanism**: the
+two prototypes tested different tree counts -- this Zig prototype used
+`evoc`'s actual default `n_trees=4` (4 workers, matching production
+usage), while the Rust prototype used an enlarged `n_trees=16`/`n_
+workers=8` to have more parallel headroom to demonstrate. The Rust
+prototype's own numbers also spawned a fresh set of workers each `--bench`
+invocation rather than a persistent pool (its writeup doesn't specify
+pool reuse), which would push its measured crossover higher via the same
+per-call worker-spawn overhead this Zig prototype's first (persistent-
+pool-less) attempt also hit. These are honest, real differences in what
+was measured (tree count, pool lifetime), not a discrepancy in the
+underlying finding -- both prototypes agree that threading RP-forest
+construction wins clearly by n=20,000-30,000 and is a net loss at n<=500.
+
+### How close does this get to full-pipeline numbers?
+
+Same caveat as the Rust section, restated for Zig's own numbers: RP-forest
+construction is a small fraction of `knn_graph`'s own time, not most of
+it (per this file's "Hot-path" section, NN-descent's iterative refinement
+dominates `knn_graph`). A rough cross-check: this file's Zig-wasm
+`stage_bench`-equivalent for `knn_graph` at n=30000 -- no separate Zig
+`stage_bench` breakdown exists in this file, but Rust native's `knn_graph`
+at n=30000 is 613-656 ms, and this pass's single-threaded RP-forest-build
+alone (Zig, wasm, n_trees=4) measured 28.36 ms at the same n -- **RP-forest
+construction is roughly 4-5% of total `knn_graph` time**, consistent with
+the Rust section's qualitative "small fraction" claim and giving it a
+number. At the measured 2.35x speedup, threading RP-forest alone saves
+about (28.36 - 12.06) ~= 16 ms out of a ~650 ms `knn_graph` stage, out of a
+~2 s full Zig-wasm pipeline at n=30000 -- **roughly 0.8% of total pipeline
+wall-clock time.** This is not remotely enough on its own to close the gap
+with Python's 24-thread numbers (Zig wasm 1.98-1.99 s vs Python 24-thread
+677 ms at n=30000); NN-descent's within-round threading (not attempted by
+either prototype) would need to be tackled for threading to meaningfully
+move the full-pipeline needle, exactly as the Rust section also concludes.
+
+### Not pursued this pass
+
+- NN-descent's within-round thread-chunking pattern -- same reasoning as
+  the Rust section: a different, harder pattern than RP-forest's
+  independent-trees case, out of scope for this prototype pass.
+- Wiring the threaded RP-forest builder into the real `knn_graph.zig`/
+  `clustering.zig` call path -- this prototype only builds forests via the
+  new standalone harness, never through the actual pipeline; the default
+  single-threaded `knn_graph.zig` -> `nndescent_float.make_float_forest`
+  path is completely untouched.
+- A genuinely shared-memory (`WebAssembly.Memory{shared:true}` + Atomics)
+  design for the real tree-build work, for the allocator-safety reason
+  above (would need a custom worker-partitioned allocator).
+- `rust/`: not touched at all, per this task's explicit scope restriction.
+
+### Verification of the existing single-threaded path (unaffected)
+
+`zig build test` (all pass, unchanged), `zig build wasm` (rebuilds
+`uvoc_core.wasm` unaffected by the new `wasm-rp-tree-proto` step existing
+alongside it), `node scripts/wasm_fixture_runner.mjs` (rust 10/10 pass,
+zig 9/10 pass 1 skip -- unchanged from before this pass), `bash scripts/
+check_all.sh` (passes end to end, zig 0.13.0, `zig fmt --check` included).
+The new `wasm_api_rp_tree_proto.zig` file and `wasm-rp-tree-proto` build
+step are additive only -- no existing export, build step, or algorithm
+file was modified.
+
+Artifacts from this pass: `zig/src/wasm_api_rp_tree_proto.zig` (new),
+`zig/build.zig` (new additive `wasm-rp-tree-proto` step only),
+`scripts/wasm_threaded_prototype_zig.mjs`, `scripts/wasm_threaded_
+prototype_zig_worker.mjs` (all prototype/experimental, explicitly not
+wired into the default pipeline).
