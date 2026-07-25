@@ -752,3 +752,165 @@ generator, regenerate via `python3 scripts/gen_scale_test_data.py`),
 harness, `node scripts/wasm_scale_benchmark.mjs [n1,n2,...]`, defaults to
 2000,10000,30000). `scripts/scale_data/*.f32` (generated datasets) are
 gitignored, not committed -- multi-MB binary blobs, trivially regenerated.
+
+## Cold-vs-warm wasm call investigation (2026-07-25)
+
+Follow-up to the "Rust wasm overhead" investigation above, which tried five
+build-configuration levers (panic=abort, allocator swap, target features,
+opt-level) and found none of them explained Rust's ~3-8x wasm slowdown
+relative to Zig -- but never isolated whether the gap was a **fixed,
+roughly n-independent one-time cost paid by a freshly instantiated wasm
+module** (e.g. allocator warmup / lazy `memory.grow` ratcheting) versus a
+genuine **per-call, per-element** cost. This pass adds that decomposition.
+
+### Method
+
+New script `scripts/wasm_cold_warm_benchmark.mjs` (kept as a reusable,
+documented tool, same pattern as `scripts/wasm_memory_probe.mjs`'s
+"repeated calls on one instance" approach): for both Rust and Zig wasm
+builds, at n=100 (`panel_small_balanced` fixture) and n=2000
+(`scripts/scale_data/scale_n2000_d32.f32`):
+
+- **cold**: 8 samples, each a *fresh* `WebAssembly.instantiate` followed by
+  timing only that instance's first `evoc_fit_predict` call.
+- **warm**: one instance, one discarded warmup call, then 10 timed calls
+  reusing that same instance's memory/allocator state.
+
+Run via `node scripts/wasm_cold_warm_benchmark.mjs`.
+
+### Result
+
+| n | Rust cold (median) | Rust warm (median) | cold-warm delta | Zig cold (median) | Zig warm (median) | cold-warm delta |
+|---|---|---|---|---|---|---|
+| 100  | 144.5 ms | 37.0 ms  | 107.4 ms | 6.2 ms   | 4.5 ms  | 1.7 ms  |
+| 2000 | 241.6 ms | 121.0 ms | 120.6 ms | 102.4 ms | 92.3 ms | 10.2 ms |
+
+### Verdict: hypothesis PARTIALLY confirmed -- a real, large, roughly
+n-independent cold-instantiation overhead exists in Rust's wasm build and
+is much larger than Zig's (~107-121 ms vs ~2-10 ms), but it does **NOT**
+explain the majority of the previously-documented gap, because that gap
+was already measured warm. `scripts/wasm_benchmark.mjs` loads each wasm
+module once and reuses the same instance across its 2 warmup + 10 timed
+iterations (i.e. it was already a "warm" measurement, confirmed here: this
+pass's own warm-n=100 median of 37.0 ms for Rust matches the previously
+recorded 36.64 ms almost exactly, within run-to-run noise). At n=100, Rust
+warm (37.0 ms) is still ~8.2x slower than Zig warm (4.5 ms) -- essentially
+the same ratio as the original end-to-end table's 8.4x (36.64 / 4.39). So:
+**the fixed-overhead hypothesis correctly predicts and explains an
+additional real cost that hits any page instantiating the module fresh and
+calling it once (a realistic browser use case), but it is a genuinely
+separate, additive phenomenon on top of the already-documented warm-call
+gap, not the root cause of that gap.** At n=2000 the *warm* gap has itself
+mostly closed (121.0 vs 92.3 ms, 1.3x) consistent with the previously
+observed narrowing at larger n (n=800: 2.6x, n=30000: ~1x) -- so the
+cold-instantiation overhead becomes proportionally more, not less,
+significant as n grows into the "wasm build advantage" territory, since
+its ~110-120 ms absolute cost stays flat while everything else shrinks in
+relative terms.
+
+### What the cold overhead was tried against and did NOT fix it
+
+**Larger initial wasm memory reservation.** Hypothesis: Rust's wasm memory
+section might declare a small initial page count, forcing many
+`memory.grow` calls to ratchet up to working size on the first call.
+Checked via a small hand-rolled leb128 memory-section parser (no
+`wasm-objdump`/`wasm2wat` available in this environment, same toolchain gap
+noted in "Toolchain ergonomics notes" above) on both compiled binaries:
+**both Rust's and Zig's `.wasm` declare an identical 17-page (1,114,112
+byte / 1.06 MiB) initial memory** -- so this specific asymmetry does not
+exist; Rust does not start from a smaller reservation than Zig.
+
+Tried anyway (in case the *increment size* of subsequent grows, not the
+starting size, was the cost): added `rust/.cargo/config.toml` scoped to
+`[target.wasm32-unknown-unknown]` with
+`rustflags = ["-C", "link-args=--initial-memory=67108864"]` (64 MiB, a
+multiple of the 65,536-byte wasm page size), rebuilt
+(`cargo build --target wasm32-unknown-unknown --release -p uvoc-core`),
+confirmed via the same leb128 parser that the initial page count changed
+to 1024 pages (64 MiB) as expected, and re-ran the cold/warm benchmark.
+**Zero measurable effect**: n=100 cold median 140.5 ms (vs 144.5 ms
+baseline, within noise), n=2000 cold median 244.2 ms (vs 241.6 ms
+baseline, within noise) -- reserving 64x more memory up front did not
+move the cold-call cost at all. **Reverted** (`rust/.cargo/config.toml`
+deleted); this change is NOT present in the final tree, matching the
+task's instruction to keep only a fix that actually helps.
+
+### Root-cause profiling (informational, no fix found)
+
+Since the memory-reserve hypothesis was cleanly refuted, a `node
+--cpu-prof` sampling profile was taken of both a single cold call (fresh
+instance, n=100) and 20 warm calls (one reused instance, n=100, after one
+discarded warmup) to localize where the time actually goes. In **both**
+profiles, the dominant sampled symbol by a wide margin is
+`__rustc::__rdl_alloc_zeroed` (Rust's `System` allocator's zeroed-allocation
+entry point, i.e. `alloc_zeroed`/`calloc`-style allocations reaching
+`wasm32-unknown-unknown`'s default `dlmalloc`-based global allocator): ~87%
+of samples in the single cold call, ~88% of samples across the 20 warm
+calls. This means the *relative* profile shape is essentially identical
+cold vs warm -- `alloc_zeroed` is the dominant cost in this pipeline either
+way -- but cold calls spend far more *absolute* time inside it. This is
+consistent with, and extends, finding (3) in the original "Rust wasm
+overhead" investigation above (swapping to a hand-rolled bump allocator
+made things *worse*, ruling out "just replace the allocator" as a fix) --
+both passes independently point at the default wasm allocator's zeroing
+path as central to the overhead, without either pass finding an actionable
+fix. **No further root-cause was isolated in the time available** (would
+need V8-internal instrumentation of individual `memory.grow`/allocator
+calls, e.g. a debug V8 build with `--trace-wasm-memory` support -- the
+release Node v20 binary available in this environment rejects that flag
+outright as unrecognized) -- flagged as remaining future work, not fixed.
+
+### Conclusion and recommendation impact
+
+**No code change was kept from this investigation** -- the initial-memory
+linker flag was tested and reverted (no benefit); no other lever was found
+that reduced either the cold or the warm gap. `rust/` and `zig/` are
+unchanged in the final tree from before this investigation started, aside
+from the new benchmark scripts and this results.md section. This does
+**not** change the "Recommendation" section above: Zig remains faster than
+Rust's wasm build across the full measured range (both warm end-to-end
+numbers and now additionally confirmed for cold-instantiation-plus-first-
+call scenarios, where Rust's relative disadvantage is if anything *worse*
+at small n because of the added ~107 ms fixed cost). The one new, actionable
+piece of information for a downstream consumer: **if a page only
+instantiates the wasm module once and calls `fit_predict` once (a common
+real-world pattern, e.g. a single-shot analysis tool), Rust's real-world
+cost at n=100 is closer to ~144 ms (cold) than the previously-reported
+~37 ms (warm-only) figure** -- a consumer that keeps one long-lived module
+instance around across multiple calls (e.g. a persistent worker) pays the
+~107-121 ms cold cost only once, not per call, which is the more favorable
+scenario and the one the original benchmark implicitly measured.
+
+Verification after this investigation (fix reverted, so this is confirming
+no regression from the revert, not from a kept change): `cargo test
+--workspace` (all pass), `zig build test` (unaffected, still passes),
+`node scripts/wasm_fixture_runner.mjs` (rust 10/10, zig 9/10 pass, 1 skip
+-- the skip count differs from the 6/10-pass/4-skip figure recorded
+earlier in this file because Zig's wasm API surface grew standalone
+`node_embedding`/`knn_graph`/cluster-tree exports in the interim, unrelated
+to this investigation), `bash scripts/check_all.sh` (passes end to end).
+Re-ran `scripts/wasm_benchmark.mjs` and `scripts/wasm_scale_benchmark.mjs`
+for fresh before/after-this-pass numbers (identical in shape to the
+existing tables above, confirming no regression from the revert):
+
+| n | Rust wasm median | Zig wasm median |
+|---|---|---|
+| 100    | 37.02 ms | 4.48 ms |
+| 240    | 42.64 ms | 11.03 ms |
+| 800    | 65.52 ms | 34.28 ms |
+| 2,000  | 249.4 ms | 139.4 ms |
+| 10,000 | 657.8 ms | 651.7 ms |
+| 30,000 | 2.08 s   | 1.98 s  |
+
+(n=2000/10000/30000 rows are fresh-instance end-to-end numbers, matching
+this file's "Scaling to 10k-30k points" methodology and gitignored
+`scripts/scale_data/` fixtures; n=100/240/800 rows are the warm
+2-warmup+10-iteration numbers from `scripts/wasm_benchmark.mjs`, matching
+this file's original "Execution time" methodology. The two measurement
+styles are not directly comparable to each other -- see the cold-vs-warm
+section above for why -- but each is internally consistent with its own
+prior recorded figures, confirming this investigation left no regression.)
+
+Artifact from this pass: `scripts/wasm_cold_warm_benchmark.mjs` (reusable,
+documented cold-vs-warm timing harness, `node
+scripts/wasm_cold_warm_benchmark.mjs`, no arguments).
