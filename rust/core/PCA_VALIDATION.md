@@ -145,3 +145,21 @@ environment with those packages plus the `evoc` reference source on
   `evoc_clusters` pipeline built on top of it produces clusterings in
   strong agreement (ARI > 0.8) with the real Python reference on a
   representative (if hand-tuned for cosine-friendliness) synthetic dataset.
+
+## Python-vs-Python null: how variable is Python's own output?
+
+The single-seed ARI numbers above (Rust 0.80 @ seed 42, Zig 0.89 @ seed 29,
+observed range 0.51-0.89 across seeds tried) are a single sample each and
+not trustworthy validation on their own. `scripts/measure_python_null.py`
+measures whether Python's *own* `evoc.EVoC.fit_predict` is this variable
+run-to-run, on the exact same X as the ARI fixture: pairwise ARI across
+`EVoC(random_state=s)` for s in 0..19 (190 pairs), results cached in
+`fixtures/clustering/python_self_agreement_null.json`. Result: Python's own
+self-agreement is broad -- median ARI 0.52, p25/p75 0.42/0.63, min 0.07,
+max 0.95, mean 0.50, std 0.20 -- comparable to (and on the low end, broader
+than) the port's observed spread. This indicates the port's seed-to-seed
+variability is largely inherent algorithm stochasticity (small dataset,
+randomized PCA, HDBSCAN-style cluster extraction all being seed-sensitive),
+not primarily a port quality gap. Full seed-panel comparison of Rust/Zig
+against this null is left to a follow-up task; see VALIDATION_PLAN.md
+section 2A.
