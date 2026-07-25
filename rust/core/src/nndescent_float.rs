@@ -16,8 +16,8 @@
 
 use crate::distance::fast_cosine;
 use crate::nnd_heap::{
-    apply_graph_update_array, apply_sorted_graph_updates, build_candidates, deheap_sort,
-    flagged_heap_push, make_heap, NNDHeap,
+    apply_graph_update_array, apply_sorted_graph_updates, deheap_sort, flagged_heap_push,
+    make_heap, NNDHeap,
 };
 use crate::rng::{tau_rand_int, RngState};
 
@@ -945,9 +945,28 @@ pub fn nn_descent_float(
     // For distance-based termination
     let mut prev_sum_dist: Option<f64> = None;
 
+    // Scratch buffers reused across all `n_iters` rounds; see the identical
+    // comment in `nn_descent_float_sorted` above for why this is a safe,
+    // value-preserving allocation-only change.
+    let mut new_candidate_indices = vec![-1i32; n_samples * max_candidates];
+    let mut new_candidate_priority = vec![f32::INFINITY; n_samples * max_candidates];
+    let mut old_candidate_indices = vec![-1i32; n_samples * max_candidates];
+    let mut old_candidate_priority = vec![f32::INFINITY; n_samples * max_candidates];
+    let mut dist_thresholds = vec![0.0f32; n_samples];
+
     for _n in 0..n_iters {
-        let (new_candidate_neighbors, old_candidate_neighbors) =
-            build_candidates(&mut current_graph, max_candidates, rng_state, n_threads);
+        crate::nnd_heap::build_candidates_into(
+            &mut current_graph,
+            max_candidates,
+            rng_state,
+            n_threads,
+            &mut new_candidate_indices,
+            &mut new_candidate_priority,
+            &mut old_candidate_indices,
+            &mut old_candidate_priority,
+        );
+        let new_candidate_neighbors = &new_candidate_indices;
+        let old_candidate_neighbors = &old_candidate_indices;
 
         let mut c: u64 = 0;
         let n_vertices = new_candidate_neighbors.len() / max_candidates;
@@ -960,9 +979,9 @@ pub fn nn_descent_float(
             let old_candidate_block =
                 &old_candidate_neighbors[block_start * max_candidates..block_end * max_candidates];
 
-            let dist_thresholds: Vec<f32> = (0..n_samples)
-                .map(|v| current_graph.distances[v * n_neighbors])
-                .collect();
+            for (v, dst) in dist_thresholds.iter_mut().enumerate() {
+                *dst = current_graph.distances[v * n_neighbors];
+            }
 
             generate_graph_update_array_float(
                 &mut update_array,
@@ -1062,9 +1081,33 @@ pub fn nn_descent_float_sorted(
 
     let mut prev_sum_dist: Option<f64> = None;
 
+    // Scratch buffers for build_candidates_into, allocated once and reused
+    // across all `n_iters` rounds (SAFE allocation-only change: same values
+    // every round since build_candidates_into resets them at entry, see its
+    // doc comment; avoids n_iters fresh allocations of 4 * n_vertices *
+    // max_candidates elements each, which showed up as the dominant wasm
+    // allocator cost in prior profiling, see comparison/results.md).
+    let mut new_candidate_indices = vec![-1i32; n_samples * max_candidates];
+    let mut new_candidate_priority = vec![f32::INFINITY; n_samples * max_candidates];
+    let mut old_candidate_indices = vec![-1i32; n_samples * max_candidates];
+    let mut old_candidate_priority = vec![f32::INFINITY; n_samples * max_candidates];
+    // Reused across rounds/blocks too, same reasoning; refilled in full
+    // every use (never partially stale).
+    let mut dist_thresholds = vec![0.0f32; n_samples];
+
     for _n in 0..n_iters {
-        let (new_candidate_neighbors, old_candidate_neighbors) =
-            build_candidates(&mut current_graph, max_candidates, rng_state, n_threads);
+        crate::nnd_heap::build_candidates_into(
+            &mut current_graph,
+            max_candidates,
+            rng_state,
+            n_threads,
+            &mut new_candidate_indices,
+            &mut new_candidate_priority,
+            &mut old_candidate_indices,
+            &mut old_candidate_priority,
+        );
+        let new_candidate_neighbors = &new_candidate_indices;
+        let old_candidate_neighbors = &old_candidate_indices;
 
         let mut c: u64 = 0;
         let n_vertices = new_candidate_neighbors.len() / max_candidates;
@@ -1077,9 +1120,9 @@ pub fn nn_descent_float_sorted(
             let old_candidate_block =
                 &old_candidate_neighbors[block_start * max_candidates..block_end * max_candidates];
 
-            let dist_thresholds: Vec<f32> = (0..n_samples)
-                .map(|v| current_graph.distances[v * n_neighbors])
-                .collect();
+            for (v, dst) in dist_thresholds.iter_mut().enumerate() {
+                *dst = current_graph.distances[v * n_neighbors];
+            }
 
             // Reset update counts for this iteration
             n_updates_per_block.fill(0);

@@ -174,13 +174,54 @@ pub fn build_candidates(
     n_threads: usize,
 ) -> (Vec<i32>, Vec<i32>) {
     let n_vertices = current_graph.n_points;
-    let n_neighbors = current_graph.size;
-
     let mut new_candidate_indices = vec![-1i32; n_vertices * max_candidates];
     let mut new_candidate_priority = vec![f32::INFINITY; n_vertices * max_candidates];
-
     let mut old_candidate_indices = vec![-1i32; n_vertices * max_candidates];
     let mut old_candidate_priority = vec![f32::INFINITY; n_vertices * max_candidates];
+
+    build_candidates_into(
+        current_graph,
+        max_candidates,
+        rng_state,
+        n_threads,
+        &mut new_candidate_indices,
+        &mut new_candidate_priority,
+        &mut old_candidate_indices,
+        &mut old_candidate_priority,
+    );
+
+    (new_candidate_indices, old_candidate_indices)
+}
+
+/// Same computation as [`build_candidates`], but writes into caller-supplied
+/// scratch buffers instead of allocating fresh ones each call. SAFE,
+/// allocation-only change (no reordering, no value change): the four
+/// buffers are fully reset to their `build_candidates` initial values
+/// (`-1`/`f32::INFINITY`) at the top of every call, exactly as a fresh
+/// `vec![...]` would be, so repeated calls (e.g. once per NN-descent
+/// `n_iters` round) produce bit-identical results to the old
+/// allocate-every-call version while letting the caller reuse the same
+/// backing memory across rounds. `new_candidate_priority`/
+/// `old_candidate_priority` are working scratch only (discarded by the
+/// caller, per the reference), so they don't need to be returned.
+#[allow(clippy::too_many_arguments)]
+pub fn build_candidates_into(
+    current_graph: &mut NNDHeap,
+    max_candidates: usize,
+    rng_state: &RngState,
+    n_threads: usize,
+    new_candidate_indices: &mut [i32],
+    new_candidate_priority: &mut [f32],
+    old_candidate_indices: &mut [i32],
+    old_candidate_priority: &mut [f32],
+) {
+    let n_vertices = current_graph.n_points;
+    let n_neighbors = current_graph.size;
+
+    new_candidate_indices.fill(-1);
+    new_candidate_priority.fill(f32::INFINITY);
+    old_candidate_indices.fill(-1);
+    old_candidate_priority.fill(f32::INFINITY);
 
     let block_size = n_vertices / n_threads + 1;
 
@@ -267,8 +308,6 @@ pub fn build_candidates(
             }
         }
     }
-
-    (new_candidate_indices, old_candidate_indices)
 }
 
 /// Port of `flagged_heap_push`: like `build_candidates_heap_push` but also
