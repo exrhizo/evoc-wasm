@@ -67,9 +67,15 @@ Legend: ✅ done · 🚧 in progress · — not started
   sklearn's solver is based on, driven by this project's own `tau_rand` RNG
   end-to-end instead of numpy's Mersenne Twister. Validated via
   reconstruction-quality unit tests (`pca.rs`) and an Adjusted Rand Index
-  check against a real `evoc.EVoC` run (ARI 0.8033 on the checked-in
-  `fixtures/clustering/evoc_clusters_e2e_ari_check.json` fixture,
-  `rust/core/tests/evoc_clusters_ari.rs`, bar: ARI > 0.8) -- **see
+  check against a real `evoc.EVoC` run. **Updated methodology (see
+  "seed-panel update" note below): the old single-seed ARI 0.8033 claim is
+  replaced by a pre-registered 20-seed panel** compared against a measured
+  Python-vs-Python self-agreement null
+  (`fixtures/clustering/python_self_agreement_null.json`, median 0.5247);
+  the Rust panel (seeds 0..19) achieves **median ARI 0.7500, min 0.2637**
+  against the cached Python(seed=42) reference
+  (`rust/core/tests/evoc_clusters_ari.rs::evoc_clusters_e2e_ari_panel_against_python_evoc`,
+  gates: median >= null_median - 0.15 = 0.3747, min >= 0.15) -- **see
   `rust/core/PCA_VALIDATION.md` for the full methodology and an explicit
   statement that this does NOT lower the bit-exact bar for any other
   component in this port.** Out of scope within this pass:
@@ -85,17 +91,18 @@ Legend: ✅ done · 🚧 in progress · — not started
   Same validation approach as Rust: `pca.zig`'s unit tests check
   reconstruction quality on a synthetic rank-2-plus-noise matrix (>90%
   captured variance), and `clustering.zig`'s
-  `evoc_clusters e2e ARI against Python evoc.EVoC` test reuses the exact
-  same cached `fixtures/clustering/evoc_clusters_e2e_ari_check.json`
-  fixture as the Rust test (same input data, same Python reference labels),
-  achieving **ARI 0.8930** (bar: ARI > 0.8; seed 29 for the Zig-internal
-  `tau_rand` pipeline -- an arbitrary choice, same as Rust's seed 42, since
-  this whole path is self-driven/non-bit-exact and any seed is a valid
-  implementation choice; a handful of seeds tried ranged roughly 0.51-0.89,
-  consistent with the pragmatic, not-bit-exact nature of this validation
-  bar per PCA_VALIDATION.md). All 124 Zig tests pass
-  (`UVOC_FIXTURES=... zig build test`), including every phase 1-8 fixture
-  test unchanged, and `zig fmt --check src/` is clean.
+  `evoc_clusters e2e ARI panel against Python evoc.EVoC` test reuses the
+  exact same cached `fixtures/clustering/evoc_clusters_e2e_ari_check.json`
+  fixture as the Rust test (same input data, same Python reference labels).
+  **Updated methodology: the old single-seed ARI 0.8930-at-seed-29 claim is
+  replaced by the same pre-registered 20-seed panel (seeds 0..19) used on
+  the Rust side**, achieving **median ARI 0.7514, min 0.5147** against the
+  cached Python(seed=42) reference, against the same gates as Rust (median
+  >= 0.3747, min >= 0.15) -- comfortably passing, and notably tighter than
+  Rust's own panel spread, though both are well within the pass region; see
+  `rust/core/PCA_VALIDATION.md` for the shared methodology and gate
+  reasoning. All Zig tests pass (`zig build test`), including every phase
+  1-8 fixture test unchanged, and `zig fmt --check src/` is clean.
 - **New (Zig, phase 8):** `np.argsort`'s exact unstable tie-break for
   float32 arrays is not reproducible against numpy 2.x, which dispatches
   contiguous-array sorts to a vectorized AVX-512 sorting-network
