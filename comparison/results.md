@@ -1331,3 +1331,238 @@ Artifact from this pass: `scripts/benchmark_python_reference.py` (reusable,
 documented; usage: `<venv>/bin/python
 scripts/benchmark_python_reference.py [n1,n2,...]`, defaults to
 100,240,800,2000,10000,30000).
+
+## Threaded RP-tree prototype (Rust, wasm threads) (2026-07-25)
+
+Prototype-only, additive pass following on from the "Hot-path" and "Python
+reference" sections above -- neither `knn_graph` (45% of pipeline time,
+hardest to thread per the earlier analysis) nor `node_embedding`/`label_
+propagation` (22%/21%) were touched; this targets specifically the RP-forest
+construction sub-step of `knn_graph`, which the earlier hot-path section
+flagged as `nndescent_float.rs`'s "make_float_tree"/"make_float_forest" and
+which Python's numba reference parallelizes.
+
+### Step 1: what Python actually parallelizes
+
+Grepped `@numba.njit(parallel=True)`/`numba.prange` across the whole
+`evoc-reference/evoc` package (`/wrk/claw-scratch/uvoc-wasm/evoc-reference`,
+`/wrk/claw-scratch/uvoc-wasm/pyenv`, same checkout used by this file's
+"Python reference: time and memory" section). Result: **far more of the
+reference is `parallel=True` than this task's working hypothesis assumed**
+-- `cluster_trees.py`, `boruvka.py`, `common_nndescent.py`, `node_embedding.py`,
+`label_propagation.py`, `numba_kdtree.py`, `graph_construction.py`, and all
+three dtype `*_nndescent.py` files (`float_nndescent.py`, `int8_nndescent.py`,
+`uint8_nndescent.py`) all have `prange` loops. Focusing on the two
+`knn_graph`-relevant ones this task asked about, in `float_nndescent.py`:
+
+- **RP-forest construction** (`make_float_forest_no_nested_parallelism` /
+  `make_float_forest_with_nested_parallelism`, `float_nndescent.py:371-403`):
+  `for i in numba.prange(len(result)): result[i] = make_float_leaf_array_*(
+  data, rng_states[i], ...)` -- confirms the working hypothesis exactly.
+  Each tree is built from read-only shared `data` plus its own private
+  `rng_states[i]` row, with zero interaction between trees during
+  construction; the only cross-tree step is the pad-and-vstack merge
+  afterward (`knn_graph.py`'s `make_forest`, sequential). This is the
+  textbook "embarrassingly parallel, independent units" case.
+- **NN-descent's refinement rounds are ALSO parallelized, but via a
+  different, harder-to-replicate strategy -- not left sequential as
+  hypothesized.** `generate_leaf_updates_float` (`float_nndescent.py:410-476`)
+  and its per-round sibling `generate_graph_update_array_float` split a
+  *single round's* candidate-generation work by partitioning the point/leaf
+  index range into `n_threads` contiguous blocks (`rows_per_thread = (block_
+  size // n_threads) + 1`), with each thread `t` writing into its own
+  private `updates[t, ...]` row of a 3-D scratch array (`numba.prange(n_
+  threads)`, no cross-thread writes) -- the results are merged back
+  sequentially before the *next* round starts. So the corrected picture is:
+  NN-descent's cross-round dependency (round `k+1` needs round `k`'s fully
+  merged graph) is real and still sequential, exactly as hypothesized --
+  but *within* a round, the work is chunked and threaded via private
+  per-thread output buffers, which is a different (and still safe) pattern
+  than "independent trees," not an admission that NN-descent has no
+  parallelism at all. This prototype pass did not attempt the within-round
+  NN-descent pattern (see "Not pursued" below) -- only the RP-forest case,
+  which is both the simpler pattern and the one explicitly scoped for this
+  pass.
+
+### Step 2: wasm threads toolchain
+
+Confirmed still works on the current environment (rustc 1.96.1 stable is
+the default; nightly was not previously installed):
+
+- `rustup install nightly` + `rustup component add rust-src --toolchain
+  nightly` succeeded cleanly (network access was available).
+- `RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals"
+  cargo +nightly build -p uvoc-core --target wasm32-unknown-unknown
+  --release -Z build-std=panic_abort,std --target-dir target-threaded-proto`
+  compiles cleanly (rustc 1.99.0-nightly 2026-07-24; one warning that
+  `atomics` is an unstable target-feature, no errors). One nightly-only
+  wrinkle found and worked around: passing
+  `-Z build-std-features=panic_immediate_abort` (used in some older wasm-
+  threads writeups) now fails outright on this nightly -- `panic_immediate_
+  abort` became a real, separate panic strategy and must be requested via
+  `panic = "immediate-abort"` in Cargo.toml or `-C panic=immediate-abort`,
+  not as a build-std feature. Simply omitting that flag (not needed for
+  this prototype) built fine. **So yes, this still requires nightly + `-Z
+  build-std` on this machine's toolchain (2026-07); no simpler stable path
+  was found or expected (`build-std` itself remains nightly-gated).**
+- **Built into a separate `--target-dir` (`rust/target-threaded-proto/`,
+  gitignored) specifically so it never touches `rust/target/wasm32-unknown-
+  unknown/release/uvoc_core.wasm`**, the path `wasm_fixture_runner.mjs` and
+  `check_all.sh` read. (A first attempt built directly into the default
+  `target/` dir and silently overwrote the existing single-threaded release
+  wasm with the atomics-enabled one -- caught immediately by re-running
+  `node scripts/wasm_fixture_runner.mjs`, no fixture failures resulted
+  because it was rebuilt from identical source before any check ran, but
+  this is exactly the mistake the task's scope-discipline section warned
+  about, noted here for honesty.)
+
+### Design deviation from the task's shared-memory sketch (deliberate, and why)
+
+The task sketched literal `WebAssembly.Memory({shared: true})` + multiple
+wasm instances/workers reading/writing that one shared memory, coordinated
+via `Atomics`. This prototype does **not** do that, and instead has each
+worker instantiate its own wasm module against its own private
+(non-shared) memory, for a concrete reason found while reading the code
+before implementing: `uvoc-core`'s wasm build uses Rust's default `dlmalloc`-
+based global allocator, which is **not thread-safe**. If N wasm instances
+truly shared one `WebAssembly.Memory`, every `Vec`/heap allocation inside
+`wasm_proto_build_one_tree` (there are several, e.g. `point_indices`,
+`hyperplane_vector`, the leaf-array `Vec<i32>`) could race on the
+allocator's free-list bookkeeping across real OS threads, since nothing in
+this codebase (or plain `dlmalloc`) makes concurrent allocation into one
+heap safe by default. Making that safe would mean writing or vendoring a
+thread-safe `#[global_allocator]` for the wasm target -- a separate,
+multi-day yak-shave from "does the wasm-threads toolchain work" (it does,
+confirmed above), and out of scope for a prototyping session per the task's
+own "don't force a fragile result" guidance.
+
+The chosen design still gets genuine multi-core wall-clock parallelism:
+Node's `worker_threads` are real OS threads (not an event-loop
+simulation), and giving each one a fully private wasm instance/memory means
+there is no shared mutable state at all, so there is no allocator race to
+reason about -- correctness follows from the per-tree independence proven
+in Step 1/PORTING.md-style code reading (`rp_forest_threaded_prototype.rs`'s
+module doc comment cites the exact lines), not from careful Atomics
+choreography. The merge step (padding tree leaf-arrays to a common width and
+stacking them, exactly what `make_forest` does today) still runs
+single-threaded on the main thread after all workers finish. This is an
+honest, weaker claim than "genuine shared-memory wasm threading, verified,"
+and is reported as such rather than glossed over.
+
+### What was built
+
+- `rust/core/src/rp_forest_threaded_prototype.rs` (new, additive,
+  `#[cfg(target_arch = "wasm32")]`-only, wired into `lib.rs` behind the same
+  cfg -- native `cargo test --workspace` never compiles it). Exports
+  `wasm_proto_alloc`/`wasm_proto_dealloc` (same protocol as `wasm_api.rs`,
+  kept independent so this file has no dependency on that one),
+  `wasm_proto_leaf_capacity` (output buffer sizing), and `wasm_proto_build_
+  one_tree` (builds exactly one RP-tree via the *existing, unmodified*
+  `make_float_leaf_array_serial` -- this prototype calls the same function
+  the single-threaded path already uses, per-tree instead of per-forest, so
+  there is no new tree-building logic to keep in parity, only a new entry
+  point).
+- `scripts/wasm_threaded_prototype.mjs` + `scripts/wasm_threaded_prototype_
+  worker.mjs` (new, `--verify` and `--bench` modes). Builds a deterministic
+  synthetic dataset + per-tree `rng_states` inline (no dependency on
+  gitignored `scale_data/`), assigns tree indices to workers round-robin
+  (assignment order is provably irrelevant to output, since a tree's bytes
+  depend only on `data` + its own `rng_state`, never on which worker builds
+  it or when), and includes a small `buildForestAdaptive` dispatcher.
+
+### Bit-parity verification
+
+`node scripts/wasm_threaded_prototype.mjs --verify` (n=4000, d=32, 8 trees,
+compares the single-threaded build against threaded builds with 2 and 4
+workers): **all 8 trees bit-identical, per-tree, at both worker counts.**
+This is a real (not hoped-for) bit-exact result, not an ARI/statistical
+fallback -- achievable here because, unlike the category (b) items flagged
+in this file's "Hot-path" section (in-place RP-tree partitioning, distance
+memoization), this prototype changes *which thread calls the function*,
+never the function's own algorithm/iteration order/RNG sequence.
+
+### Benchmark: single-threaded vs threaded, by size
+
+24-core machine, `nTrees=16`, `nWorkers=8` (`node
+scripts/wasm_threaded_prototype.mjs --bench`; single-run wall-clock, not
+multi-sample-median -- a prototype-grade measurement, flagged as such):
+
+| n | single-threaded | threaded (8 workers) | speedup |
+|---|---|---|---|
+| 100    | 2.30 ms   | 21.88 ms | 0.11x |
+| 500    | 4.48 ms   | 32.97 ms | 0.14x |
+| 2,000  | 8.83 ms   | 31.29 ms | 0.28x |
+| 5,000  | 22.96 ms  | 32.52 ms | 0.71x |
+| 6,000  | 27.49 ms  | 41.07 ms | 0.67x |
+| 7,000  | 30.66 ms  | 37.93 ms | 0.81x |
+| 8,000  | 37.15 ms  | 38.21 ms | 0.97x (~break-even) |
+| 10,000 | 46.83 ms  | 42.83 ms | 1.09x |
+| 20,000 | 102.36 ms | 57.17 ms | 1.79x |
+| 30,000 | 164.29 ms | 69.23 ms | 2.37x |
+
+**Adaptive threshold found empirically: ~n=8,000-10,000** is the crossover
+(worker-spawn + per-worker wasm-instantiate + postMessage-copy overhead
+stops dominating). `buildForestAdaptive` in the harness uses **n=10,000**
+(the first clearly-won point, not the noisier ~8,000 break-even) as a
+deliberately conservative default. Below that, threading is a net loss --
+consistent with this file's repeated finding elsewhere (wasm cold-start,
+per-call overhead) that small-n work doesn't clear fixed-cost floors.
+
+### How close does this get to Python's multi-threaded numbers?
+
+Numbers above are for **RP-forest construction alone**, not full
+`knn_graph` (let alone the full pipeline) -- `knn_graph` is RP-forest +
+NN-descent, and per the "Hot-path" section RP-forest construction is a
+minority share of `knn_graph`'s own time (most of `knn_graph`'s cost is
+NN-descent's iterative refinement, which this pass explicitly did not
+thread -- see Step 1's correction above). So this result **cannot** be
+directly compared to this file's full-pipeline Python-vs-Rust tables
+(single-threaded Python 1796 ms / 24-thread Python 677 ms / Rust native
+~1.4s at n=30000) -- doing so would overstate the win. Qualitatively: a
+2.37x speedup on the sub-stage that was threaded, if it held for the
+*whole* `knn_graph` stage (an assumption, not measured), would claw back
+some but not all of the 24-thread-Python-vs-single-thread-Rust gap at
+n=30000 (Rust ~1.4s pipeline vs Python 24-thread 677ms total; `knn_graph` is
+~45% of Rust's pipeline time, so a 2.37x speedup on 45% of ~1.4s saves
+~370ms, landing around ~1.0-1.1s total -- still slower than Python's
+24-thread 677ms, though meaningfully closer than today's gap). This
+back-of-envelope estimate is explicitly NOT a measured full-pipeline
+threaded number -- wiring the threaded RP-forest into the real `knn_graph`/
+`evoc_clusters` call path, re-running the full per-stage breakdown, and
+threading NN-descent's within-round pattern (Step 1's correction) would all
+be needed for a real end-to-end comparison, and none of that was attempted
+this pass (scope discipline: RP-forest-only prototype, as the task
+specified).
+
+### Not pursued this pass
+
+- NN-descent's within-round thread-chunking pattern (Step 1's correction) --
+  a different, harder pattern (shared candidate-update merge each round)
+  than RP-forest's independent-trees pattern; not attempted.
+- Wiring the threaded RP-forest builder into the real `knn_graph`/
+  `evoc_clusters` pipeline (this prototype only builds forests in
+  isolation, via the new harness, not through `clustering.rs`'s real call
+  path) -- doing so would need the single-threaded default path to keep
+  calling today's `make_forest` unchanged while a new opt-in path calls the
+  threaded builder, then a real full-pipeline stage_bench-style comparison.
+- A genuinely shared-memory (`SharedArrayBuffer` + `Atomics`) design, which
+  would need a thread-safe global allocator (see "Design deviation" above).
+- Zig: not touched at all, per the task's explicit scope restriction.
+
+### Verification of the existing single-threaded path (unaffected)
+
+After rebuilding the default `rust/target/wasm32-unknown-unknown/release/
+uvoc_core.wasm` with the ordinary stable toolchain (undoing the accidental
+nightly/atomics overwrite noted above): `cargo test --workspace` (all pass),
+`node scripts/wasm_fixture_runner.mjs` (rust 10/10 pass, zig 9/10 pass 1
+skip -- unchanged), `bash scripts/check_all.sh` (passes end to end,
+zig 0.13.0). The new `rp_forest_threaded_prototype.rs` module is `#[cfg(
+target_arch = "wasm32")]`-gated exactly like the existing `wasm_api.rs`, so
+it compiles into the same default wasm binary as a handful of new,
+unused-unless-called exports -- it does not change any existing export's
+behavior, and native tests never see it at all.
+
+Artifacts from this pass: `rust/core/src/rp_forest_threaded_prototype.rs`,
+`scripts/wasm_threaded_prototype.mjs`, `scripts/wasm_threaded_prototype_
+worker.mjs` (all prototype/experimental, explicitly not wired into the
+default pipeline).

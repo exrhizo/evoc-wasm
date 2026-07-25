@@ -1,4 +1,5 @@
 target/
+rust/target-threaded-proto/
 zig-cache/
 .zig-cache/
 zig-out/

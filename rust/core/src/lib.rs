@@ -21,3 +21,10 @@ pub mod pca;
 pub mod rng;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_api;
+
+// PROTOTYPE (see module doc comment): additive, opt-in wasm-threads
+// experiment for RP-forest construction. Not part of the porting contract's
+// module map, not used by the default single-threaded pipeline, and only
+// compiled for wasm32 -- native `cargo test --workspace` never sees it.
+#[cfg(target_arch = "wasm32")]
+pub mod rp_forest_threaded_prototype;
