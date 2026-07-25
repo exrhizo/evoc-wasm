@@ -800,3 +800,216 @@ test "evoc_clusters e2e ARI panel against Python evoc.EVoC" {
     try std_testing.expect(dist.median >= MEDIAN_GATE);
     try std_testing.expect(dist.min >= MIN_GATE);
 }
+
+// ---------------------------------------------------------------------------
+// Dataset-panel extension (VALIDATION_PLAN.md section 2C). Same methodology
+// as the single-dataset ARI panel above, repeated across 4 additional
+// synthetic datasets varying n/dims/cluster count/balance/noise
+// (`scripts/gen_evoc_clusters_panel_fixtures.py`,
+// `fixtures/clustering/panel_*.json` / `panel_*_null.json`), each with its
+// OWN measured Python self-agreement null (smaller seed panel 0..9, not
+// 0..19) and gates derived the same way as the single-dataset test. Mirrors
+// `rust/core/tests/evoc_clusters_panel_ari.rs` -- see that file's doc
+// comment for full rationale.
+// ---------------------------------------------------------------------------
+
+const PANEL_SEED_PANEL = [_]i64{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+
+const PanelCase = struct {
+    name: []const u8,
+    null_median: f64,
+    null_min: f64,
+};
+
+/// Copied from the `summary` block of each `panel_<name>_null.json`
+/// fixture (seeds 0..9, 45 pairs each); keep in sync with
+/// `rust/core/tests/evoc_clusters_panel_ari.rs`'s `PANEL_CASES` and
+/// re-derive both if the generator's dataset parameters ever change.
+const PANEL_CASES = [_]PanelCase{
+    .{ .name = "small_balanced", .null_median = 0.8821553583424672, .null_min = 0.5675081126411357 },
+    .{ .name = "large_many_clusters", .null_median = 0.40498395387834163, .null_min = 0.02973372261369582 },
+    .{ .name = "imbalanced", .null_median = 0.2739452749407144, .null_min = 0.02964012012244541 },
+    .{ .name = "high_dim_noisy", .null_median = 0.6349687720666672, .null_min = 0.20729166600989643 },
+};
+
+const PANEL_MEDIAN_MARGIN: f64 = 0.15;
+/// Absolute floor, set loosely below the smallest observed null_min across
+/// all 4 datasets (0.0296); see the Rust sibling test's identical comment.
+const PANEL_MIN_FLOOR: f64 = 0.01;
+
+fn panelOpts() EvocClustersOptions {
+    return EvocClustersOptions{
+        .noise_level = 0.5,
+        .base_min_cluster_size = 5,
+        .n_neighbors = 15,
+        .min_samples = 5,
+        .n_epochs = 50,
+        .neighbor_scale = 1.0,
+        .min_similarity_threshold = 0.2,
+        .max_layers = 10,
+        .n_label_prop_iter = 20,
+        .node_embedding_dim = null,
+    };
+}
+
+test "evoc_clusters dataset panel ARI against Python" {
+    const alloc = std_testing.allocator;
+    var any_failed = false;
+
+    for (PANEL_CASES) |case| {
+        var case_name_buf: [64]u8 = undefined;
+        const case_fixture_name = try std.fmt.bufPrint(&case_name_buf, "panel_{s}", .{case.name});
+        const fx = try fixture.readFixture(alloc, "clustering", case_fixture_name);
+        defer fx.deinit();
+        const root = fx.value.object;
+        const n_samples: usize = @intCast(root.get("n_samples").?.integer);
+        const n_features: usize = @intCast(root.get("n_features").?.integer);
+
+        const m = try readMatrixF32(alloc, root.get("data").?.array);
+        defer alloc.free(m.data);
+        try std_testing.expectEqual(n_samples * n_features, m.data.len);
+
+        const python_labels_arr = root.get("python_labels").?.array;
+        const python_labels = try alloc.alloc(i64, python_labels_arr.items.len);
+        defer alloc.free(python_labels);
+        for (python_labels_arr.items, 0..) |v, i| python_labels[i] = v.integer;
+
+        const python_metrics = root.get("python_internal_metrics").?.object;
+        const python_n_clusters = python_metrics.get("n_clusters").?.integer;
+        const python_noise_frac = python_metrics.get("noise_fraction").?.float;
+
+        var aris = std.ArrayList(f64).init(alloc);
+        defer aris.deinit();
+        var n_clusters_found = std.ArrayList(i64).init(alloc);
+        defer n_clusters_found.deinit();
+        var noise_min: f64 = std.math.inf(f64);
+        var noise_max: f64 = -std.math.inf(f64);
+
+        for (PANEL_SEED_PANEL) |seed| {
+            var evoc = EVoC.init(alloc, seed, panelOpts());
+            defer evoc.deinit();
+            const zig_labels = try evoc.fit_predict(m.data, n_features);
+            const ari = try adjustedRandIndex(alloc, python_labels, zig_labels);
+            try aris.append(ari);
+
+            var seen = std.AutoHashMap(i64, void).init(alloc);
+            defer seen.deinit();
+            var n_noise: usize = 0;
+            for (zig_labels) |l| {
+                if (l == -1) {
+                    n_noise += 1;
+                } else {
+                    try seen.put(l, {});
+                }
+            }
+            try n_clusters_found.append(@intCast(seen.count()));
+            const nf: f64 = @as(f64, @floatFromInt(n_noise)) / @as(f64, @floatFromInt(n_samples));
+            noise_min = @min(noise_min, nf);
+            noise_max = @max(noise_max, nf);
+        }
+
+        const dist = try summarize(alloc, aris.items);
+        const median_gate = case.null_median - PANEL_MEDIAN_MARGIN;
+        std.debug.print(
+            "[{s}] Zig ARI panel (seeds 0..9) vs Python(seed=42): min={d:.4} p25={d:.4} " ++
+                "median={d:.4} p75={d:.4} max={d:.4} (null_median={d:.4} gate={d:.4}, null_min={d:.4} floor={d:.4})\n",
+            .{ case.name, dist.min, dist.p25, dist.median, dist.p75, dist.max, case.null_median, median_gate, case.null_min, PANEL_MIN_FLOOR },
+        );
+        const nc_sorted = try alloc.dupe(i64, n_clusters_found.items);
+        defer alloc.free(nc_sorted);
+        std.mem.sort(i64, nc_sorted, {}, std.sort.asc(i64));
+        std.debug.print(
+            "[{s}] internal metrics: Python n_clusters={d} noise_frac={d:.4}; Zig n_clusters " ++
+                "found min/median/max={d}/{d}/{d} noise_frac min/max={d:.4}/{d:.4}\n",
+            .{ case.name, python_n_clusters, python_noise_frac, nc_sorted[0], nc_sorted[nc_sorted.len / 2], nc_sorted[nc_sorted.len - 1], noise_min, noise_max },
+        );
+
+        if (dist.median < median_gate) {
+            std.debug.print("[{s}] FAIL: median ARI {d:.4} < gate {d:.4}\n", .{ case.name, dist.median, median_gate });
+            any_failed = true;
+        }
+        if (dist.min < PANEL_MIN_FLOOR) {
+            std.debug.print("[{s}] FAIL: min ARI {d:.4} < floor {d:.4}\n", .{ case.name, dist.min, PANEL_MIN_FLOOR });
+            any_failed = true;
+        }
+    }
+
+    try std_testing.expect(!any_failed);
+}
+
+// ---------------------------------------------------------------------------
+// Metamorphic / property tests (VALIDATION_PLAN.md section 2E). No Python
+// reference needed. Mirrors
+// `rust/core/tests/evoc_clusters_metamorphic.rs` -- see that file's doc
+// comment for full rationale, including the documented (not fixed here)
+// scale-invariance finding.
+// ---------------------------------------------------------------------------
+
+test "determinism: same seed same data is byte-identical" {
+    const alloc = std_testing.allocator;
+    const fx = try fixture.readFixture(alloc, "clustering", "evoc_clusters_e2e_ari_check");
+    defer fx.deinit();
+    const root = fx.value.object;
+    const n_features: usize = @intCast(root.get("n_features").?.integer);
+    const m = try readMatrixF32(alloc, root.get("data").?.array);
+    defer alloc.free(m.data);
+
+    const seeds = [_]i64{ 0, 7, 42, 123 };
+    for (seeds) |seed| {
+        var evoc_a = EVoC.init(alloc, seed, panelOpts());
+        defer evoc_a.deinit();
+        const labels_a = try evoc_a.fit_predict(m.data, n_features);
+
+        var evoc_b = EVoC.init(alloc, seed, panelOpts());
+        defer evoc_b.deinit();
+        const labels_b = try evoc_b.fit_predict(m.data, n_features);
+
+        try std_testing.expectEqualSlices(i64, labels_a, labels_b);
+    }
+}
+
+/// **FINDING (documented, not fixed -- see `PCA_VALIDATION.md` and the
+/// identical Rust test's doc comment in
+/// `rust/core/tests/evoc_clusters_metamorphic.rs`): scale invariance does
+/// NOT hold exactly.** Scaling every input row by a positive constant
+/// changes a large fraction of output labels (confirmed independently in
+/// Rust: 171/240 differ at seed 0, scale 0.001 -- not merely a relabeling).
+/// Root cause: `knn_graph`'s unit-normalization is only invariant to
+/// positive scaling in exact arithmetic; float32 rounding differs between
+/// `x/||x||` and `(x*s)/||x*s||`, and that ULP-scale difference compounds
+/// through the same seed-sensitive RNG-driven pipeline documented elsewhere
+/// in this file to be highly input-sensitive (see the Rust-vs-Zig
+/// cross-language divergence writeup in `PCA_VALIDATION.md`). This test is
+/// disabled (renamed with a `_disabled_` prefix so it does not run under
+/// normal `zig build test`, matching the Rust sibling's `#[ignore]`) per
+/// the task's explicit instruction to report rather than silently loosen
+/// the assertion, and NOT to modify core algorithm files to fix it.
+fn disabled_scale_invariance_positive_scalar_does_not_change_labels() !void {
+    const alloc = std_testing.allocator;
+    const fx = try fixture.readFixture(alloc, "clustering", "evoc_clusters_e2e_ari_check");
+    defer fx.deinit();
+    const root = fx.value.object;
+    const n_features: usize = @intCast(root.get("n_features").?.integer);
+    const m = try readMatrixF32(alloc, root.get("data").?.array);
+    defer alloc.free(m.data);
+
+    const scales = [_]f32{ 0.001, 2.0, 1000.0 };
+    const seeds = [_]i64{ 0, 42 };
+    for (scales) |scale| {
+        const scaled = try alloc.alloc(f32, m.data.len);
+        defer alloc.free(scaled);
+        for (m.data, 0..) |x, i| scaled[i] = x * scale;
+
+        for (seeds) |seed| {
+            var evoc_orig = EVoC.init(alloc, seed, panelOpts());
+            defer evoc_orig.deinit();
+            const labels_orig = try evoc_orig.fit_predict(m.data, n_features);
+
+            var evoc_scaled = EVoC.init(alloc, seed, panelOpts());
+            defer evoc_scaled.deinit();
+            const labels_scaled = try evoc_scaled.fit_predict(scaled, n_features);
+
+            try std_testing.expectEqualSlices(i64, labels_orig, labels_scaled);
+        }
+    }
+}

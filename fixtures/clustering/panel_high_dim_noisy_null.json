@@ -1,0 +1,308 @@
+{
+  "component": "clustering",
+  "case": "panel_high_dim_noisy_null",
+  "note": "Python evoc.EVoC self-agreement null for dataset panel variant 'high_dim_noisy', smaller seed panel (0..9, 45 pairs) than the original single-dataset null's 0..19 (190 pairs) since this covers 4 additional datasets. Same X as panel_high_dim_noisy.json.",
+  "source_fixture": "panel_high_dim_noisy.json",
+  "n_samples": 300,
+  "n_features": 64,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "evoc_version": "unknown",
+  "pairwise_ari": [
+    {
+      "seed_a": 0,
+      "seed_b": 1,
+      "ari": 0.6829884397018777
+    },
+    {
+      "seed_a": 0,
+      "seed_b": 2,
+      "ari": 0.8085052527146954
+    },
+    {
+      "seed_a": 0,
+      "seed_b": 3,
+      "ari": 0.5449191226167717
+    },
+    {
+      "seed_a": 0,
+      "seed_b": 4,
+      "ari": 0.7262863435962039
+    },
+    {
+      "seed_a": 0,
+      "seed_b": 5,
+      "ari": 0.4352161782126733
+    },
+    {
+      "seed_a": 0,
+      "seed_b": 6,
+      "ari": 0.715464416987853
+    },
+    {
+      "seed_a": 0,
+      "seed_b": 7,
+      "ari": 0.6087485484124804
+    },
+    {
+      "seed_a": 0,
+      "seed_b": 8,
+      "ari": 0.4492798411566436
+    },
+    {
+      "seed_a": 0,
+      "seed_b": 9,
+      "ari": 0.8085052527146954
+    },
+    {
+      "seed_a": 1,
+      "seed_b": 2,
+      "ari": 0.8122140344996135
+    },
+    {
+      "seed_a": 1,
+      "seed_b": 3,
+      "ari": 0.6596712316039135
+    },
+    {
+      "seed_a": 1,
+      "seed_b": 4,
+      "ari": 0.7432745934707351
+    },
+    {
+      "seed_a": 1,
+      "seed_b": 5,
+      "ari": 0.4417112058473217
+    },
+    {
+      "seed_a": 1,
+      "seed_b": 6,
+      "ari": 0.6753576952911026
+    },
+    {
+      "seed_a": 1,
+      "seed_b": 7,
+      "ari": 0.6141284142900318
+    },
+    {
+      "seed_a": 1,
+      "seed_b": 8,
+      "ari": 0.46629768707404917
+    },
+    {
+      "seed_a": 1,
+      "seed_b": 9,
+      "ari": 0.8122140344996135
+    },
+    {
+      "seed_a": 2,
+      "seed_b": 3,
+      "ari": 0.6713390999756534
+    },
+    {
+      "seed_a": 2,
+      "seed_b": 4,
+      "ari": 0.8707884109876437
+    },
+    {
+      "seed_a": 2,
+      "seed_b": 5,
+      "ari": 0.6349687720666672
+    },
+    {
+      "seed_a": 2,
+      "seed_b": 6,
+      "ari": 0.824574552221051
+    },
+    {
+      "seed_a": 2,
+      "seed_b": 7,
+      "ari": 0.8078318402181928
+    },
+    {
+      "seed_a": 2,
+      "seed_b": 8,
+      "ari": 0.479187034425191
+    },
+    {
+      "seed_a": 2,
+      "seed_b": 9,
+      "ari": 1.0
+    },
+    {
+      "seed_a": 3,
+      "seed_b": 4,
+      "ari": 0.59543631846816
+    },
+    {
+      "seed_a": 3,
+      "seed_b": 5,
+      "ari": 0.37089138395718685
+    },
+    {
+      "seed_a": 3,
+      "seed_b": 6,
+      "ari": 0.5331951330594502
+    },
+    {
+      "seed_a": 3,
+      "seed_b": 7,
+      "ari": 0.4758145493139671
+    },
+    {
+      "seed_a": 3,
+      "seed_b": 8,
+      "ari": 0.40477977770872714
+    },
+    {
+      "seed_a": 3,
+      "seed_b": 9,
+      "ari": 0.6713390999756534
+    },
+    {
+      "seed_a": 4,
+      "seed_b": 5,
+      "ari": 0.4833666737121764
+    },
+    {
+      "seed_a": 4,
+      "seed_b": 6,
+      "ari": 0.8307807449432537
+    },
+    {
+      "seed_a": 4,
+      "seed_b": 7,
+      "ari": 0.6639034845986433
+    },
+    {
+      "seed_a": 4,
+      "seed_b": 8,
+      "ari": 0.4809366030831165
+    },
+    {
+      "seed_a": 4,
+      "seed_b": 9,
+      "ari": 0.8707884109876437
+    },
+    {
+      "seed_a": 5,
+      "seed_b": 6,
+      "ari": 0.4502834844243666
+    },
+    {
+      "seed_a": 5,
+      "seed_b": 7,
+      "ari": 0.6145446349623326
+    },
+    {
+      "seed_a": 5,
+      "seed_b": 8,
+      "ari": 0.20729166600989643
+    },
+    {
+      "seed_a": 5,
+      "seed_b": 9,
+      "ari": 0.6349687720666672
+    },
+    {
+      "seed_a": 6,
+      "seed_b": 7,
+      "ari": 0.6244960089707545
+    },
+    {
+      "seed_a": 6,
+      "seed_b": 8,
+      "ari": 0.48252437488109445
+    },
+    {
+      "seed_a": 6,
+      "seed_b": 9,
+      "ari": 0.824574552221051
+    },
+    {
+      "seed_a": 7,
+      "seed_b": 8,
+      "ari": 0.29234525072096273
+    },
+    {
+      "seed_a": 7,
+      "seed_b": 9,
+      "ari": 0.8078318402181928
+    },
+    {
+      "seed_a": 8,
+      "seed_b": 9,
+      "ari": 0.479187034425191
+    }
+  ],
+  "summary": {
+    "n_pairs": 45,
+    "min": 0.20729166600989643,
+    "p25": 0.479187034425191,
+    "median": 0.6349687720666672,
+    "p75": 0.8078318402181928,
+    "max": 1.0,
+    "mean": 0.6242833733620703,
+    "std": 0.17190319648449096
+  },
+  "python_internal_metrics_by_seed": {
+    "0": {
+      "n_clusters": 9,
+      "noise_fraction": 0.18666666666666668
+    },
+    "1": {
+      "n_clusters": 8,
+      "noise_fraction": 0.19333333333333333
+    },
+    "2": {
+      "n_clusters": 6,
+      "noise_fraction": 0.0
+    },
+    "3": {
+      "n_clusters": 9,
+      "noise_fraction": 0.25333333333333335
+    },
+    "4": {
+      "n_clusters": 8,
+      "noise_fraction": 0.08
+    },
+    "5": {
+      "n_clusters": 9,
+      "noise_fraction": 0.29333333333333333
+    },
+    "6": {
+      "n_clusters": 8,
+      "noise_fraction": 0.18
+    },
+    "7": {
+      "n_clusters": 8,
+      "noise_fraction": 0.23
+    },
+    "8": {
+      "n_clusters": 11,
+      "noise_fraction": 0.32666666666666666
+    },
+    "9": {
+      "n_clusters": 6,
+      "noise_fraction": 0.0
+    }
+  },
+  "python_internal_metrics_summary": {
+    "n_clusters_found_min": 6,
+    "n_clusters_found_max": 11,
+    "n_clusters_found_median": 8.0,
+    "noise_fraction_min": 0.0,
+    "noise_fraction_max": 0.32666666666666666,
+    "noise_fraction_median": 0.19
+  }
+}

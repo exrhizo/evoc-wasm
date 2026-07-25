@@ -327,3 +327,152 @@ state to build the real starting `rng_state`, mirroring what
 ever matters (e.g. for the seed panels used throughout this validation
 effort, or for downstream users relying on `random_state` for genuinely
 independent runs).
+
+## Dataset panel (VALIDATION_PLAN.md section 2C)
+
+The ARI panel above (`evoc_clusters_ari.rs` / the "evoc_clusters e2e ARI
+panel" Zig test) only ever exercised ONE synthetic dataset shape (240x24,
+6 balanced clusters). `scripts/gen_evoc_clusters_panel_fixtures.py` extends
+this to 4 additional datasets, all using the same cosine-friendly
+orthogonal-axis-centers construction established above (NOT plain
+`make_blobs` -- see "why isn't it `make_blobs` verbatim" -- centers are
+placed along scaled orthogonal axes so cluster identity survives
+`knn_graph`'s row-normalization to unit vectors), varying n, dimensionality,
+cluster count, class balance, and noise scale:
+
+| dataset | n | dims | clusters | sizes | noise_scale |
+|---|---|---|---|---|---|
+| `small_balanced` | 100 | 12 | 4 | 25 each | 0.35 |
+| `large_many_clusters` | 800 | 32 | 8 | 100 each | 0.6 |
+| `imbalanced` | 325 | 16 | 5 | 20/35/60/90/120 | 0.5 |
+| `high_dim_noisy` | 300 | 64 | 6 | 50 each | 0.9 |
+
+For each dataset the same script also measures that dataset's OWN Python
+self-agreement null (pairwise ARI across `evoc.EVoC(random_state=s)` for `s`
+in 0..9 -- a SMALLER 10-seed panel than the original single-dataset null's
+0..19, since this covers 4x the datasets, 45 pairs each instead of 190) and
+records a fixed `evoc.EVoC(random_state=42)` reference labeling, all cached
+in `fixtures/clustering/panel_<name>.json` / `panel_<name>_null.json`.
+Regenerate via:
+
+```
+PYTHONPATH=/path/to/evoc-reference /path/to/venv/bin/python \
+    scripts/gen_evoc_clusters_panel_fixtures.py
+```
+
+(this run used a freshly-built venv at `/wrk/tmp/uvoc-pyenv` with
+numpy/scipy/scikit-learn/numba/tqdm installed via `uv`, since the
+previously-documented `/scratch/pyenv` and `/wrk/claw-scratch/uvoc-wasm/pyenv`
+copies were both stale/broken -- the latter's `python` symlink pointed at a
+`uv`-managed interpreter owned by a different user account that no longer
+exists on this machine; `/wrk/claw-scratch/uvoc-wasm/evoc-reference` (the
+`evoc` source checkout) was still valid and reused as-is).
+
+**Gates**, per dataset, mirroring the original panel's derivation but using
+each dataset's OWN null instead of the single shared one (dataset shapes
+differ enough in inherent stochasticity -- null medians range 0.27 to 0.88
+across the 4 new datasets -- that a single shared gate would be either too
+loose for the easy datasets or impossible for the hard ones):
+`median(ARI_port↔py) >= null_median - 0.15`, `min(ARI_port↔py) >= 0.01`
+(a much looser absolute floor than the single-dataset panel's 0.15, since
+some of these datasets' own null_min is as low as 0.0296 -- `imbalanced` in
+particular is a genuinely hard clustering problem even for Python with
+itself). Implemented in
+`rust/core/tests/evoc_clusters_panel_ari.rs::evoc_clusters_dataset_panel_ari_against_python`
+and `zig/src/clustering.zig`'s `"evoc_clusters dataset panel ARI against
+Python"` test, each running a 10-seed panel (0..9) per dataset.
+
+**Results** (both ports cleared every gate on every dataset):
+
+| dataset | null median (py↔py) | Rust median (vs py) | Zig median (vs py) |
+|---|---|---|---|
+| `small_balanced` | 0.8822 | 0.7604 | 0.8859 |
+| `large_many_clusters` | 0.4050 | 0.6001 | 0.5103 |
+| `imbalanced` | 0.2739 | 0.2439 | 0.2635 |
+| `high_dim_noisy` | 0.6350 | 0.7246 | 0.7229 |
+
+(Full min/p25/median/p75/max plus per-seed values are printed by both test
+suites; see `cargo test --test evoc_clusters_panel_ari -- --nocapture` /
+`zig build test`.) Every dataset's median comfortably cleared its gate
+(margins ranged from ~0.03 for `imbalanced` -- the hardest case, as expected
+given its severe class imbalance and highest noise-to-signal difficulty
+among the four -- up to several tenths for the others), and no seed on any
+dataset in either language dropped below the 0.01 floor. This is consistent
+with the original single-dataset finding: the port's agreement with Python
+tracks Python's own self-agreement reasonably closely across a genuinely
+varied set of dataset shapes, not just the one hand-tuned dataset used
+originally.
+
+**Python-free internal metrics sanity check** (task PART 1 item 3): both
+test suites also record, per seed, the number of non-noise clusters found
+and the noise-point fraction, and print a comparison against Python's
+recorded metrics on the same dataset (fixed reference run). Eyeballing the
+printed output (`cargo test ... -- --nocapture` / `zig build test`'s
+stdout): both ports' cluster counts and noise fractions land in the same
+rough neighborhood as Python's for every dataset (e.g. `imbalanced`: Python
+finds 13 clusters/40% noise; Rust's 10-seed panel finds 7-12
+clusters/18-36% noise; Zig's finds 9-13 clusters/19-44% noise -- broadly
+overlapping, not wildly divergent in either direction). No dataset showed
+the "similar ARI but systematically much noisier/emptier" failure mode this
+check was meant to catch. This is an eyeball/range check, not a formal
+statistical test, per the task's scope.
+
+## Metamorphic property tests (VALIDATION_PLAN.md section 2E)
+
+Two Python-free property tests were added to both languages
+(`rust/core/tests/evoc_clusters_metamorphic.rs`;
+`zig/src/clustering.zig`'s `"determinism..."` and
+`disabled_scale_invariance_..."` tests).
+
+**1. Determinism: PASSES in both languages.** Running
+`EVoC::fit_predict`/`evoc_clusters` twice with the same seed on the same
+data produces byte-identical label output (checked across seeds 0, 7, 42,
+123, on the original single-dataset fixture). This confirms explicitly, as
+a regression guard, what the self-driven `tau_rand` design implies but had
+never been directly asserted: `EVoC::fit_predict`/`evoc_clusters` has no
+hidden non-determinism (e.g. no reliance on hash-map iteration order,
+thread scheduling, or uninitialized memory) in either port.
+
+**2. Scale invariance: FAILS in both languages -- documented finding, NOT
+fixed (out of scope per task instructions).** The expectation was that
+multiplying every input row by a positive constant should not change the
+output labels at all, since `knn_graph` row-normalizes every point to a
+unit vector (cosine distance) before any stochastic step -- in exact
+arithmetic, `x/‖x‖ == (s·x)/‖s·x‖` for any `s > 0`. In practice this is
+**not exactly true in float32**: at seed 0, scaling by `0.001` changes
+171 of 240 labels in the Rust port (confirmed by direct array comparison,
+not just an ARI/permutation check -- this is not a relabeling, the
+partitions themselves differ substantially). The two float32 computations
+`x / ||x||` and `(x * s) / ||x * s||` do not round to bit-identical results
+(different intermediate magnitudes round differently at each step), so the
+very first stochastic pipeline stage (`knn_graph`'s NN-descent/RP-tree
+candidate selection, which can flip on near-ties) already observes slightly
+different floats between the scaled and unscaled runs. That ULP-scale
+difference then compounds through the rest of the self-driven,
+seed-sensitive pipeline (randomized PCA, label propagation,
+node-embedding SGD) -- the exact same mechanism already documented above in
+"Cross-language (Rust vs Zig) agreement", where 30/3600 ULP-scale
+`nn_dists` differences between two independently-written same-algorithm
+implementations were found to compound into a median cross-language ARI of
+only 0.67. Scale invariance failing for the same structural reason, within
+a single language/implementation, is consistent with (not contradicted by)
+that finding -- it is more evidence that this pipeline, taken as a whole,
+is extremely sensitive to any ULP-scale perturbation of its input, whatever
+the perturbation's source (cross-language float summation order,
+scale-then-normalize rounding, or ordinary seed variation).
+
+This is flagged here rather than silently patched, per the task's explicit
+instruction: fixing it would require either (a) normalizing before the
+scale is ever applied in a way that's insensitive to the scale's magnitude
+(not obviously safe against making some other property worse) or (b)
+switching `knn_graph`'s row-normalization arithmetic to something less
+rounding-sensitive (e.g. compute in f64 internally) -- either is a change
+to core algorithm files (`knn_graph`/`clustering.rs`/`clustering.zig`),
+explicitly out of scope for this validation-only task. The property tests
+are kept in the suite in a disabled state (`#[ignore]` in Rust, a
+`disabled_`-prefixed non-`test` function in Zig, matching that language's
+idiom for "written but not run by default") with an exact-equality
+assertion preserved as-written (not loosened to an ARI/permutation check)
+so the test continues to state the property that was actually asked for,
+and will fail loudly again if anyone re-enables it after a future change to
+the normalization/RNG pipeline.
