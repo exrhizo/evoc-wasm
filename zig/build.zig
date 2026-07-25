@@ -15,4 +15,33 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit + fixture parity tests");
     test_step.dependOn(&run_lib_unit_tests.step);
+
+    // ---------------------------------------------------------------------
+    // wasm32-freestanding build (see zig/WASM_API.md).
+    //
+    // Independent of the native target/optimize options above: always
+    // wasm32-freestanding, always ReleaseSmall unless overridden, so
+    // `zig build wasm` behaves the same regardless of `-Dtarget`/
+    // `-Doptimize` flags a caller might also pass for the native steps.
+    // ---------------------------------------------------------------------
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const wasm_optimize = b.option(std.builtin.OptimizeMode, "wasm-optimize", "Optimize mode for `zig build wasm`") orelse .ReleaseSmall;
+
+    const wasm_lib = b.addExecutable(.{
+        .name = "uvoc_core",
+        .root_source_file = b.path("src/wasm_api.zig"),
+        .target = wasm_target,
+        .optimize = wasm_optimize,
+    });
+    // Freestanding: no _start, export only the `export fn`s in wasm_api.zig
+    // (plus the linear memory itself).
+    wasm_lib.entry = .disabled;
+    wasm_lib.rdynamic = true;
+
+    const wasm_install = b.addInstallArtifact(wasm_lib, .{});
+    const wasm_step = b.step("wasm", "Build wasm32-freestanding uvoc_core.wasm");
+    wasm_step.dependOn(&wasm_install.step);
 }
