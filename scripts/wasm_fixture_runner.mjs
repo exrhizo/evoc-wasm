@@ -494,6 +494,14 @@ class ZigCore {
   readI64(ptr, count) {
     return Array.from(new BigInt64Array(this.memory.buffer, ptr, count)).map((x) => Number(x));
   }
+  readI32(ptr, count) {
+    return Array.from(new Int32Array(this.memory.buffer, ptr, count));
+  }
+  writeU32(arr) {
+    const ptr = this.alloc(arr.length * 4);
+    new Uint32Array(this.memory.buffer, ptr, arr.length).set(arr);
+    return { ptr, len: arr.length * 4 };
+  }
   free(...bufs) {
     for (const b of bufs) this.dealloc(b.ptr, b.len);
   }
@@ -596,18 +604,138 @@ async function runZig(reporter) {
     });
   }
 
-  reporter.skip(
-    "cluster_trees/* (mst_to_linkage_tree, condense_tree, labels_and_strengths)",
-    "zig wasm_api.zig has no standalone cluster-tree export (only reachable internally via cluster_layers_base/evoc_fit_predict, which don't expose the intermediate linkage/condensed-tree shape needed for these fixtures)",
-  );
-  reporter.skip(
-    "node_embedding/* (all cases)",
-    "zig wasm_api.zig has no standalone node_embedding export (only reachable internally via cluster_layers_base/evoc_fit_predict)",
-  );
-  reporter.skip(
-    "graph/knn_graph_n120_d8_k10_seed42",
-    "zig wasm_api.zig has no standalone knn_graph export (only reachable internally via evoc_fit_predict)",
-  );
+  // -- cluster trees: chain boruvka MST -> cluster_tree_labels ---------------
+  // Same fixture-chaining approach as the Rust adapter above.
+  await reporter.run("cluster_trees/labels_and_strengths_n80_mcs5 (chained from mst_to_linkage_tree_n80)", () => {
+    const mstFx = loadFixture("cluster_trees", "mst_to_linkage_tree_n80");
+    const labelsFx = loadFixture("cluster_trees", "labels_and_strengths_n80_mcs5");
+    const nSamples = labelsFx.inputs.n_samples;
+    const sm = mstFx.inputs.sorted_mst;
+    const nEdges = sm.point_a.length;
+    const flat = new Float32Array(nEdges * 3);
+    for (let i = 0; i < nEdges; i++) {
+      flat[i * 3] = sm.point_a[i];
+      flat[i * 3 + 1] = sm.point_b[i];
+      flat[i * 3 + 2] = sm.distance[i];
+    }
+    const edgesBuf = core.writeF32(flat);
+    const outLabelsPtr = core.alloc(nSamples * 4);
+    const outStrengthsPtr = core.alloc(nSamples * 4);
+    const status = core.exports.cluster_tree_labels(
+      edgesBuf.ptr,
+      nEdges,
+      nSamples,
+      5n, // min_cluster_size=5 (the "_mcs5" fixture name), i64 param
+      outLabelsPtr,
+      outStrengthsPtr,
+    );
+    assert(status === 0, `cluster_tree_labels status ${status}`);
+    const labels = core.readI32(outLabelsPtr, nSamples);
+    const strengths = core.readF32(outStrengthsPtr, nSamples);
+    core.free(
+      edgesBuf,
+      { ptr: outLabelsPtr, len: nSamples * 4 },
+      { ptr: outStrengthsPtr, len: nSamples * 4 },
+    );
+    const labelsCmp = compareIntArray(labels, labelsFx.expected.labels, "labels");
+    assert(labelsCmp.ok, labelsCmp.detail);
+    const strengthTol = tolFor(labelsFx.tolerance, "strengths");
+    const strengthsCmp = compareF32Array(strengths, labelsFx.expected.strengths, strengthTol, "strengths");
+    assert(strengthsCmp.ok, strengthsCmp.detail);
+  });
+
+  // -- node embedding: determinism only (see Rust adapter's note above for
+  // why node_embedding_e2e_n120 is not directly fixture-comparable against
+  // the self-driven path) ------------------------------------------------
+  await reporter.run("node_embedding/node_embedding determinism (not fixture-comparable, see note)", () => {
+    const fx = loadFixture("node_embedding", "node_embedding_e2e_n120");
+    const nVertices = fx.inputs.n_vertices;
+    const nComponents = fx.inputs.n_components;
+    const indptr = core.writeU32(fx.inputs.indptr);
+    const indices = core.writeU32(fx.inputs.indices);
+    const data = core.writeF32(fx.inputs.data);
+    const nnz = fx.inputs.indices.length;
+
+    function runOnce(seed) {
+      const outPtr = core.alloc(nVertices * nComponents * 4);
+      const status = core.exports.node_embedding(
+        indptr.ptr,
+        indices.ptr,
+        data.ptr,
+        nVertices,
+        nnz,
+        nComponents,
+        10,
+        0, // initial_embedding_ptr = null -> random init
+        0.1,
+        1.0,
+        0.5,
+        BigInt(seed),
+        outPtr,
+      );
+      assert(status === 0, `node_embedding status ${status}`);
+      const out = core.readF32(outPtr, nVertices * nComponents);
+      core.free({ ptr: outPtr, len: nVertices * nComponents * 4 });
+      return out;
+    }
+    const a = runOnce(42);
+    const b = runOnce(42);
+    const cmp = compareF32Array(a, b, { exact: true }, "same-seed embedding");
+    assert(cmp.ok, cmp.detail);
+    core.free(indptr, indices, data);
+  });
+
+  // -- knn_graph: structural sanity + determinism, not fixture-exact --------
+  await reporter.run("graph/knn_graph_n120_d8_k10_seed42 structural sanity + determinism (not fixture-comparable, see note)", () => {
+    const fx = loadFixture("graph", "knn_graph_n120_d8_k10_seed42");
+    const data = fx.inputs.data.flat();
+    const nSamples = fx.inputs.data.length;
+    const nFeatures = fx.inputs.data[0].length;
+    const k = fx.inputs.n_neighbors;
+    const dataBuf = core.writeF32(data);
+
+    function runOnce(seed) {
+      const outIdx = core.alloc(nSamples * k * 4);
+      const outDist = core.alloc(nSamples * k * 4);
+      const status = core.exports.knn_graph(
+        dataBuf.ptr,
+        nSamples,
+        nFeatures,
+        k,
+        BigInt(40), // leaf_size
+        fx.inputs.n_iters,
+        fx.inputs.effective_max_candidates,
+        fx.inputs.delta,
+        BigInt(200), // max_rptree_depth
+        1, // use_sorted_updates
+        BigInt(seed),
+        outIdx,
+        outDist,
+      );
+      assert(status === 0, `knn_graph status ${status}`);
+      const idx = core.readI32(outIdx, nSamples * k);
+      const dist = core.readF32(outDist, nSamples * k);
+      core.free({ ptr: outIdx, len: nSamples * k * 4 }, { ptr: outDist, len: nSamples * k * 4 });
+      return { idx, dist };
+    }
+    const r1 = runOnce(42);
+    const r2 = runOnce(42);
+    assert(compareIntArray(r1.idx, r2.idx, "idx").ok, "same-seed indices differ");
+    assert(compareF32Array(r1.dist, r2.dist, { exact: true }, "dist").ok, "same-seed distances differ");
+    for (let i = 0; i < nSamples; i++) {
+      for (let j = 0; j < k; j++) {
+        const ix = r1.idx[i * k + j];
+        assert(ix >= 0 && ix < nSamples, `row ${i} neighbor ${j}: index ${ix} out of range`);
+        if (j > 0) {
+          assert(
+            r1.dist[i * k + j] >= r1.dist[i * k + j - 1] - 1e-4,
+            `row ${i}: distances not sorted ascending at ${j}`,
+          );
+        }
+      }
+    }
+    core.free(dataBuf);
+  });
 
   // -- cluster_layers_base: compare against fixture's base layer -------------
   // build_cluster_layers_n126 has no RNG (see its `note`); cluster_layers_base

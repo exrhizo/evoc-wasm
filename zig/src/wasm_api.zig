@@ -37,15 +37,17 @@
 //!
 //! Exposes: alloc/dealloc, distance kernels, a full boruvka MST
 //! (kdtree-build + parallel_boruvka fused into one call, since the kdtree
-//! is not independently useful to a wasm caller), cluster-layers extraction
-//! from a precomputed embedding (`build_cluster_layers`), and the full
-//! end-to-end `evoc_clusters` / `EVoC.fit_predict` pipeline (which
-//! internally exercises knn_graph, graph_construction, label_propagation
-//! and node_embedding -- those are not separately exposed as standalone
-//! wasm entry points because their native signatures take CSR graphs /
-//! intermediate RNG state that has no useful flat-buffer representation on
-//! its own; `evoc_fit_predict` is the intended way to exercise that part of
-//! the pipeline from JS).
+//! is not independently useful to a wasm caller), a standalone seed-driven
+//! `knn_graph`, a standalone seed-driven `node_embedding` (the self-driven
+//! path, `node_embedding_repr_self_driven`), a standalone `cluster_tree_labels`
+//! (MST -> linkage -> condensed tree -> EOM labels/strengths), cluster-layers
+//! extraction from a precomputed embedding (`build_cluster_layers`), and the
+//! full end-to-end `evoc_clusters` / `EVoC.fit_predict` pipeline. `knn_graph`
+//! and `node_embedding` here derive their internal RNG state deterministically
+//! from a scalar `seed` rather than accepting externally-recorded RNG draws,
+//! so they are not bit-exact against fixtures recorded from the Python/native
+//! reference's own RNG sequence -- they are validated for structural
+//! correctness and same-seed determinism instead (see WASM_API.md).
 //!
 //! See WASM_API.md at the repo root of zig/ for the full function list.
 
@@ -203,6 +205,239 @@ export fn cluster_layers_base(
         out_strengths[i] = base_strengths[i];
     }
     return @intCast(layers.cluster_layers.len);
+}
+
+// ---------------------------------------------------------------------------
+// Standalone kNN graph (knn_graph.zig)
+// ---------------------------------------------------------------------------
+
+/// Approximate kNN graph over `data` (row-major `n_samples x n_features`,
+/// f32, assumed already unit-normalized -- matching `knn_graph.knn_graph`'s
+/// own assumption). Single-threaded (`n_threads = 1`).
+///
+/// `seed` drives every RNG draw (RP-forest construction + NN-descent
+/// candidate sampling) via this project's own `tau_rand`-based `rng.State`,
+/// using the same draw sequence `clustering.evoc_clusters` uses internally
+/// (`n_trees = 4`, one `rng.State` draw for nn_descent then one per tree) --
+/// this is NOT the same RNG a caller could reconstruct from an externally
+/// recorded `RngState`/`rng_states` fixture (see WASM_API.md).
+///
+/// `out_indices`/`out_dists` must each point at a caller-allocated buffer of
+/// `n_samples * n_neighbors` elements (i32 / f32 respectively).
+/// `max_rptree_depth` mirrors `make_forest`'s parameter (200 is the
+/// reference default); `use_sorted_updates` mirrors `nn_descent`'s
+/// (`true` is the reference default).
+///
+/// Returns 0 on success, -2 on allocation/internal failure.
+export fn knn_graph(
+    data_ptr: [*]const f32,
+    n_samples: usize,
+    n_features: usize,
+    n_neighbors: usize,
+    leaf_size: i64,
+    n_iters: usize,
+    effective_max_candidates: usize,
+    delta: f64,
+    max_rptree_depth: i64,
+    use_sorted_updates: bool,
+    seed: i64,
+    out_indices: [*]i32,
+    out_dists: [*]f32,
+) i32 {
+    const data = data_ptr[0 .. n_samples * n_features];
+
+    var state: core.rng.State = undefined;
+    core.rng.seed(&state, seed);
+
+    const drawRngState = struct {
+        fn call(s: *core.rng.State) core.rng.State {
+            return .{
+                @as(i64, core.rng.tau_rand_int(s)),
+                @as(i64, core.rng.tau_rand_int(s)),
+                @as(i64, core.rng.tau_rand_int(s)),
+            };
+        }
+    }.call;
+
+    const n_trees: usize = 4;
+    var rng_state = drawRngState(&state);
+    const rng_states = allocator.alloc(core.rng.State, n_trees) catch return -2;
+    defer allocator.free(rng_states);
+    for (rng_states) |*rs| rs.* = drawRngState(&state);
+
+    var result = core.knn_graph.knn_graph(
+        allocator,
+        data,
+        n_features,
+        n_neighbors,
+        &rng_state,
+        rng_states,
+        leaf_size,
+        n_iters,
+        effective_max_candidates,
+        delta,
+        delta,
+        max_rptree_depth,
+        use_sorted_updates,
+        1,
+    ) catch return -2;
+    defer result.deinit();
+
+    const n = n_samples * n_neighbors;
+    for (0..n) |i| {
+        out_indices[i] = @intCast(result.indices[i]);
+        out_dists[i] = result.distances[i];
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Standalone node embedding (node_embedding.zig)
+// ---------------------------------------------------------------------------
+
+/// Self-driven node embedding (`node_embedding.node_embedding_repr_self_driven`)
+/// over a CSR affinity graph of `n_vertices` vertices.
+///
+/// `graph_indptr` (`n_vertices + 1` u32), `graph_indices` / `graph_data`
+/// (`nnz` u32 / f32, `nnz = graph_indptr[n_vertices]`).
+/// `initial_embedding_ptr` may be null (address 0) to request a random
+/// (tau_rand-driven standard-normal, scale 0.25) init seeded by `seed`, or
+/// point at `n_vertices * n_components` f32 to seed the layout explicitly.
+///
+/// `out_embedding` must point at a caller-allocated buffer of
+/// `n_vertices * n_components` f32.
+///
+/// This is the self-driven/reproducible path used internally by
+/// `evoc_fit_predict` -- NOT bit-exact with the Python reference (only a
+/// numpy-MT replay could achieve that; see node_embedding.zig's doc
+/// comment), and not directly comparable to fixtures recorded against the
+/// externally-RNG-driven `node_embedding_epoch_repr` path.
+///
+/// Returns 0 on success, -2 on allocation/internal failure.
+export fn node_embedding(
+    graph_indptr_ptr: [*]const u32,
+    graph_indices_ptr: [*]const u32,
+    graph_data_ptr: [*]const f32,
+    n_vertices: usize,
+    nnz: usize,
+    n_components: usize,
+    n_epochs: usize,
+    initial_embedding_ptr: ?[*]const f32,
+    initial_alpha: f32,
+    negative_sample_rate: f32,
+    noise_level: f32,
+    seed: i64,
+    out_embedding: [*]f32,
+) i32 {
+    const graph_indptr = graph_indptr_ptr[0 .. n_vertices + 1];
+    const graph_indices = graph_indices_ptr[0..nnz];
+    const graph_data = graph_data_ptr[0..nnz];
+    const initial: ?[]const f32 = if (initial_embedding_ptr) |p| p[0 .. n_vertices * n_components] else null;
+
+    var state: core.rng.State = undefined;
+    core.rng.seed(&state, seed);
+
+    const embedding = core.node_embedding.node_embedding_repr_self_driven(
+        allocator,
+        graph_indptr,
+        graph_indices,
+        graph_data,
+        n_vertices,
+        n_components,
+        n_epochs,
+        initial,
+        initial_alpha,
+        negative_sample_rate,
+        noise_level,
+        &state,
+    ) catch return -2;
+    defer allocator.free(embedding);
+
+    @memcpy(out_embedding[0 .. n_vertices * n_components], embedding);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Standalone cluster tree (cluster_trees.zig): MST -> linkage -> condensed
+// -> EOM labels + strengths
+// ---------------------------------------------------------------------------
+
+/// MST -> linkage tree -> condensed tree -> excess-of-mass labels +
+/// membership strengths, in one call (composes `mst_to_linkage_tree`,
+/// `condense_tree`, `extract_leaves`, `get_cluster_label_vector`,
+/// `get_point_membership_strength_vector` -- the same chain
+/// `clustering.build_cluster_layers`'s base layer uses).
+///
+/// `mst_edges_ptr` points at `n_edges * 3` f32 elements: flat row-major
+/// `(point_a, point_b, distance)` triples (matching `boruvka_mst`'s output
+/// layout; `n_edges` is normally `n_samples - 1`). Edges are sorted by
+/// distance internally, so the caller does not need to pre-sort.
+///
+/// `out_labels` / `out_strengths` must each point at a caller-allocated
+/// buffer of `n_samples` elements (i32 / f32 respectively).
+///
+/// Returns 0 on success, -2 on allocation/internal failure.
+export fn cluster_tree_labels(
+    mst_edges_ptr: [*]const f32,
+    n_edges: usize,
+    n_samples: usize,
+    min_cluster_size: i64,
+    out_labels: [*]i32,
+    out_strengths: [*]f32,
+) i32 {
+    const flat = mst_edges_ptr[0 .. n_edges * 3];
+
+    const mst_left = allocator.alloc(f32, n_edges) catch return -2;
+    defer allocator.free(mst_left);
+    const mst_right = allocator.alloc(f32, n_edges) catch return -2;
+    defer allocator.free(mst_right);
+    const mst_dist = allocator.alloc(f32, n_edges) catch return -2;
+    defer allocator.free(mst_dist);
+
+    const Edge = struct { a: f32, b: f32, d: f32 };
+    const edges = allocator.alloc(Edge, n_edges) catch return -2;
+    defer allocator.free(edges);
+    for (0..n_edges) |i| {
+        edges[i] = .{ .a = flat[i * 3], .b = flat[i * 3 + 1], .d = flat[i * 3 + 2] };
+    }
+    std.mem.sort(Edge, edges, {}, struct {
+        fn lessThan(_: void, x: Edge, y: Edge) bool {
+            return x.d < y.d;
+        }
+    }.lessThan);
+    for (edges, 0..) |e, i| {
+        mst_left[i] = e.a;
+        mst_right[i] = e.b;
+        mst_dist[i] = e.d;
+    }
+
+    var linkage = core.cluster_trees.mst_to_linkage_tree(allocator, mst_left, mst_right, mst_dist) catch return -2;
+    defer linkage.deinit();
+
+    var condensed = core.cluster_trees.condense_tree(
+        allocator,
+        linkage.left,
+        linkage.right,
+        linkage.delta,
+        linkage.size,
+        min_cluster_size,
+    ) catch return -2;
+    defer condensed.deinit();
+
+    const leaves = core.cluster_trees.extract_leaves(allocator, &condensed) catch return -2;
+    defer allocator.free(leaves);
+
+    const labels = core.cluster_trees.get_cluster_label_vector(allocator, &condensed, leaves, 0.0, n_samples) catch return -2;
+    defer allocator.free(labels);
+
+    const strengths = core.cluster_trees.get_point_membership_strength_vector(allocator, &condensed, leaves, labels) catch return -2;
+    defer allocator.free(strengths);
+
+    for (0..n_samples) |i| {
+        out_labels[i] = @intCast(labels[i]);
+        out_strengths[i] = strengths[i];
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------

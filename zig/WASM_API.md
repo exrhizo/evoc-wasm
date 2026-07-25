@@ -125,18 +125,78 @@ Writes selected-layer labels (`-1` = noise) into caller-allocated
 `out_labels` (i64, `n_samples` elements). Returns `0` on success, `-2` on
 allocation/internal failure.
 
+### `knn_graph(data_ptr: f32*, n_samples: usize, n_features: usize, n_neighbors: usize, leaf_size: i64, n_iters: usize, effective_max_candidates: usize, delta: f64, max_rptree_depth: i64, use_sorted_updates: bool, seed: i64, out_indices: i32*, out_dists: f32*) -> i32`
+Standalone approximate kNN graph (`knn_graph.knn_graph`) over `data`
+(row-major `n_samples x n_features` f32, assumed already unit-normalized).
+Single-threaded (`n_threads = 1`).
+
+`seed` drives every RNG draw (RP-forest construction + NN-descent candidate
+sampling) via this project's own `tau_rand`-based `rng.State`, using the
+same draw sequence `clustering.evoc_clusters` uses internally (`n_trees =
+4`: one `rng.State` draw for nn_descent, then one per tree). This is a
+different draw sequence than an externally-recorded `RngState`/`rng_states`
+fixture would supply, so this function is **not bit-exact against fixtures
+recorded from the Python/native reference's own RNG sequence** — it is
+validated for structural correctness (indices in range, distances sorted
+ascending per row) and same-seed determinism instead.
+
+`out_indices`/`out_dists` must each point at a caller-allocated buffer of
+`n_samples * n_neighbors` elements (i32 / f32 respectively). `leaf_size`
+and `max_rptree_depth` mirror `make_forest`'s parameters (`40`/`200` are
+reasonable defaults); `use_sorted_updates` mirrors `nn_descent`'s flag
+(`true` is the reference default).
+
+Returns `0` on success, `-2` on allocation/internal failure.
+
+### `node_embedding(graph_indptr_ptr: u32*, graph_indices_ptr: u32*, graph_data_ptr: f32*, n_vertices: usize, nnz: usize, n_components: usize, n_epochs: usize, initial_embedding_ptr: f32* (or 0/null), initial_alpha: f32, negative_sample_rate: f32, noise_level: f32, seed: i64, out_embedding: f32*) -> i32`
+Standalone self-driven node embedding
+(`node_embedding.node_embedding_repr_self_driven`) over a CSR affinity
+graph of `n_vertices` vertices: `graph_indptr` (`n_vertices + 1` u32),
+`graph_indices`/`graph_data` (`nnz` u32/f32, `nnz = graph_indptr[n_vertices]`).
+
+`initial_embedding_ptr` may be `0` (null) to request a random
+(`tau_rand`-driven standard-normal, scale `0.25`) init seeded by `seed`, or
+point at `n_vertices * n_components` f32 to seed the layout explicitly.
+`out_embedding` must point at a caller-allocated buffer of the same size.
+
+This is the reproducible/self-driven RNG path used internally by
+`evoc_fit_predict` — **not bit-exact with the Python reference** (only a
+numpy-MT replay could achieve that), and not directly comparable to
+fixtures recorded against the externally-RNG-driven
+`node_embedding_epoch_repr` path (which takes a caller-supplied per-epoch
+`rng_val` array and `node_order` shuffles, not a scalar seed). Validated
+for same-seed determinism instead.
+
+Returns `0` on success, `-2` on allocation/internal failure.
+
+### `cluster_tree_labels(mst_edges_ptr: f32*, n_edges: usize, n_samples: usize, min_cluster_size: i64, out_labels: i32*, out_strengths: f32*) -> i32`
+Standalone MST → linkage tree → condensed tree → excess-of-mass labels +
+membership strengths, in one call. Composes `cluster_trees.mst_to_linkage_tree`
+→ `condense_tree` → `extract_leaves` → `get_cluster_label_vector` →
+`get_point_membership_strength_vector` — the same chain
+`clustering.build_cluster_layers`'s base layer uses, with
+`cluster_selection_epsilon` hardcoded to `0.0`.
+
+`mst_edges_ptr` points at `n_edges * 3` f32 elements: flat row-major
+`(point_a, point_b, distance)` triples (matching `boruvka_mst`'s output
+layout; `n_edges` is normally `n_samples - 1`). Edges are sorted by
+distance internally, so the caller does not need to pre-sort.
+
+`out_labels`/`out_strengths` must each point at a caller-allocated buffer
+of `n_samples` elements (i32 / f32 respectively).
+
+Returns `0` on success, `-2` on allocation/internal failure.
+
 ## Not separately exposed (and why)
 
-`knn_graph`, `graph_construction`, `label_propagation`, and `node_embedding`
-are exercised internally by `evoc_fit_predict` but have no standalone wasm
-entry points in this pass: their native signatures operate on CSR graphs
-and threaded RNG state (`rng.State`) that don't have a natural flat-buffer
-representation on their own, and the task's "at minimum" bar is satisfied
-by covering them through the end-to-end pipeline call. Adding standalone
-wrappers for these is a reasonable follow-up if a caller needs to inspect
-intermediate pipeline state (e.g. the knn graph before clustering), but was
-out of scope here to avoid guessing at an ABI shape not yet exercised by
-any caller.
+`graph_construction` and `label_propagation` are exercised internally by
+`evoc_fit_predict` but have no standalone wasm entry points: their native
+signatures operate on intermediate CSR/init-embedding state with no
+independently useful flat-buffer representation for a caller not already
+holding a `knn_graph`/`node_embedding` result from the two exports above.
+`evoc_fit_predict` remains the intended way to exercise the full pipeline
+in one call; `knn_graph`, `node_embedding`, and `cluster_tree_labels` above
+cover the standalone/inspectable intermediate stages.
 
 ## Freestanding-wasm gotchas encountered
 
