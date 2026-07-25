@@ -24,10 +24,15 @@ pub fn build(b: *std.Build) void {
     // `zig build wasm` behaves the same regardless of `-Dtarget`/
     // `-Doptimize` flags a caller might also pass for the native steps.
     // ---------------------------------------------------------------------
-    const wasm_target = b.resolveTargetQuery(.{
+    const wasm_simd = b.option(bool, "wasm-simd", "Enable wasm SIMD128 (baseline+simd128) for `zig build wasm`. MUST rerun `node scripts/wasm_fixture_runner.mjs` after enabling and confirm bit-exact fixture parity still holds -- SIMD can reorder floating-point ops.") orelse false;
+    var wasm_target_query = std.Target.Query{
         .cpu_arch = .wasm32,
         .os_tag = .freestanding,
-    });
+    };
+    if (wasm_simd) {
+        wasm_target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.wasm.Feature.simd128));
+    }
+    const wasm_target = b.resolveTargetQuery(wasm_target_query);
     const wasm_optimize = b.option(std.builtin.OptimizeMode, "wasm-optimize", "Optimize mode for `zig build wasm`") orelse .ReleaseSmall;
 
     const wasm_lib = b.addExecutable(.{

@@ -14,15 +14,30 @@ section 3 for why a wasm target exists at all.
 cd zig
 zig build wasm                      # ReleaseSmall (default), see build.zig
 zig build wasm -Dwasm-optimize=Debug  # or ReleaseFast/ReleaseSafe
+zig build wasm -Dwasm-simd=true       # opt-in SIMD128 target feature, see note below
 ```
 
 Output: `zig/zig-out/bin/uvoc_core.wasm`. Target is always
 `wasm32-freestanding` regardless of `-Dtarget`/`-Doptimize` passed for the
 native `zig build test` step — the wasm step resolves its own fixed target
 query and reads `-Dwasm-optimize` as a separate option (default
-`ReleaseSmall`). ReleaseSmall build size at time of writing: **174,824
-bytes** (~171 KiB), unstripped/pre-any-further-optimization (no `wasm-opt`
+`ReleaseSmall`). ReleaseSmall build size at time of writing: **189,994
+bytes** (~186 KiB), unstripped/pre-any-further-optimization (no `wasm-opt`
 pass applied — that's left to downstream tooling if desired).
+
+**`-Dwasm-optimize=ReleaseFast` and `-Dwasm-simd=true` were both evaluated
+and rejected as the default** (see `comparison/results.md`'s "Wasm
+build-config experiment", 2026-07-25): ReleaseFast is ~12x larger for only
+a ~3-6% speed gain; SIMD128 is bit-exact-safe (verified via
+`node scripts/wasm_fixture_runner.mjs`) but yields no measurable size or
+speed change since no core algorithm file uses explicit `@Vector` types for
+the auto-vectorizer to widen. `-Dwasm-simd=true` is kept as a documented
+opt-in `build.zig` option for future work if hot loops are ever rewritten
+with explicit vector types — **if you enable it, always rerun
+`node scripts/wasm_fixture_runner.mjs` afterward** and confirm the zig
+fixture checks still pass bit-exact, since SIMD can in general reorder
+floating-point operations (this port's numeric-parity guarantee depends on
+exact operation order, per `PORTING.md`).
 
 The native `zig build test` step is completely unaffected by this addition;
 it still builds/runs only for the host target as before.

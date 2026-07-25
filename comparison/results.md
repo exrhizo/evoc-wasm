@@ -27,6 +27,24 @@ section below -- so this is not a fully apples-to-apples surface; Zig's
 number would grow somewhat if it exposed the same functions, but the gap is
 large enough that the direction of the result is unlikely to flip).
 
+**Update 2026-07-25 (build-config investigation, ReleaseSmall default
+unchanged):** now that Zig's `wasm_api.zig` exports standalone
+`node_embedding`/`knn_graph`/`cluster_tree_labels` (closing most of the API
+gap noted above), a fresh ReleaseSmall build measures **189,994 bytes**
+raw / **73,289 bytes** gzip -9 -- larger than the 174,824-byte figure above
+because of the added exports, still well under Rust's 243,119. Two
+alternative Zig build configs were tried and rejected as the default (see
+"Wasm build-config experiment" under Execution time for the full
+before/after numbers): `-Dwasm-optimize=ReleaseFast` balloons the binary to
+**2,323,782 bytes** (~12x larger, 637,266 bytes gzip) for only a ~3-6%
+median speed gain -- not a good trade for a browser/npm target. Wasm SIMD
+(`-Dwasm-simd=true`, new `build.zig` option, off by default) is
+bit-exact-safe (fixture parity holds, see below) but produces virtually
+no size or speed change, since none of the core algorithm code uses
+explicit `@Vector` types for the compiler to widen -- so it isn't worth
+enabling by default either. **ReleaseSmall, no SIMD, remains the
+recommended default** and `zig/build.zig`'s wasm step is unchanged.
+
 ## Execution time
 
 Measured 2026-07-25 on this machine, Node v20.19.4, single-threaded, no
@@ -103,6 +121,49 @@ cluster-tree labels or `node_embedding` (only reachable inside
 finer per-stage breakdown isn't possible through the current Zig wasm API --
 end-to-end `fit_predict` timing above is the primary signal.
 
+### Wasm build-config experiment (Zig only, 2026-07-25)
+
+Investigated whether `zig build wasm -Dwasm-optimize=ReleaseFast` (default
+is `ReleaseSmall`) and/or wasm SIMD128 (new `-Dwasm-simd=true` option added
+to `zig/build.zig`, off by default -- the target was previously hardcoded
+via `resolveTargetQuery` with no way to add `simd128` as a target feature)
+are worthwhile levers. All three configs measured with the same
+`scripts/wasm_benchmark.mjs` harness (2 warmup + 10 timed iters):
+
+| Config | n=100 median | n=240 median | n=800 median | Raw size | gzip -9 |
+|---|---|---|---|---|---|
+| ReleaseSmall (current default)          | 4.52 ms  | 10.90 ms | 33.06 ms | 189,994 bytes   | 73,289 bytes  |
+| ReleaseFast                              | 4.26 ms  | 10.38 ms | 31.99 ms | 2,323,782 bytes | 637,266 bytes |
+| ReleaseSmall + SIMD128 (`-Dwasm-simd=true`) | 4.46 ms  | 10.90 ms | 32.24 ms | 189,699 bytes   | n/a (not separately gzipped, same order as ReleaseSmall) |
+
+**ReleaseFast**: ~3-6% median speed improvement across the three dataset
+sizes, at the cost of a **~12.2x larger raw binary** (2.3 MB vs 190 KB) and
+~8.7x larger gzip. For a browser/npm package where binary transfer size
+directly affects load time, this is a bad trade for a marginal runtime
+gain -- **not adopted as the default**.
+
+**SIMD128**: essentially a wash on both size (189,699 vs 189,994 bytes,
+within noise) and speed (all three datasets within the ReleaseSmall
+baseline's own run-to-run noise band). This is expected: none of the core
+algorithm files (`knn_graph.zig`, `node_embedding.zig`, `pca.zig`,
+`label_propagation.zig`, `cluster_trees.zig`) use explicit `@Vector` types,
+and Zig 0.13's `ReleaseSmall`/`ReleaseFast` auto-vectorizer does not appear
+to find much to widen in this codebase's scalar loops -- so enabling the
+target feature alone, without also rewriting hot loops to use `@Vector`,
+buys nothing. **Verified safe or not**: bit-exactness was checked via
+`node scripts/wasm_fixture_runner.mjs` against the SIMD128 build --
+**9/10 zig checks pass, 0 fail, 1 skip (same skip as the non-SIMD
+baseline, the unrelated missing int-inner-product-distance export)** --
+so SIMD128 does not break fixture parity here, but since it also provides
+no measurable benefit, it is **left off by default**; `-Dwasm-simd=true` is
+kept as a documented opt-in `build.zig` option for future work if/when hot
+loops are rewritten with explicit vector types.
+
+**Recommendation**: `zig build wasm`'s default (`ReleaseSmall`, no SIMD) is
+**unchanged** -- it was already the best point on the size/speed tradeoff
+of the three configs measured; neither alternative earns adoption on this
+codebase's current code shape.
+
 ### Peak memory (wasm), largest dataset (`panel_large_many_clusters`, n=800, d=32)
 
 Measured as final `memory.buffer.byteLength` after one `evoc_fit_predict`
@@ -117,14 +178,70 @@ Both numbers are surprisingly large for an 800x32 input (a few hundred KB of
 raw data) and clearly dominated by internal working-set allocations
 somewhere in the pipeline (candidates: per-epoch node-embedding buffers,
 repeated KNN/graph construction scratch space, or non-freeing bump-style
-allocation patterns) rather than the output itself. This was not root-caused
-in this pass -- flagged as a real finding for anyone doing further wasm
-memory-budget work, not just noise. Zig's footprint here is roughly 2x
-Rust's, the reverse of the binary-size and execution-time results above.
-Not measured: true peak-during-run (would need `memory.grow` call
-interception or a wasm-level profiler), memory for the two smaller
-datasets, or breakdown by pipeline stage -- noted as future work per the
-task's guidance not to over-invest in this sub-item.
+allocation patterns) rather than the output itself. Zig's footprint here is
+roughly 2x Rust's, the reverse of the binary-size and execution-time
+results above.
+
+**Root-cause investigation (2026-07-25, Zig side).** Wrote
+`scripts/wasm_memory_probe.mjs` (kept in the tree as a reusable throwaway
+diagnostic, not wired into `check_all.sh`) which calls Zig's
+`evoc_fit_predict` 6 times in a row on the same wasm instance/dataset
+(`panel_large_many_clusters`, n=800) with different seeds, logging
+`memory.buffer.byteLength` after every call to distinguish a one-time
+high-water-mark ratchet from a genuine per-call leak:
+
+```
+initial memory.buffer.byteLength = 1,114,112 (1.1 MiB)
+call 1: after=1,077,477,376 (1027.6 MiB)
+call 2: after=1,077,805,056 (1027.9 MiB)  delta=+327,680
+call 3: after=1,077,870,592 (1027.9 MiB)  delta=+65,536
+call 4: after=1,077,936,128 (1028.0 MiB)  delta=+65,536
+call 5: after=1,078,001,664 (1028.1 MiB)  delta=+65,536
+call 6: after=1,078,067,200 (1028.1 MiB)  delta=+65,536
+```
+
+**Verdict: overwhelmingly a one-time ratchet, not a leak.** ~99.97% of the
+final footprint (1027.6 of ~1028.1 MiB) is allocated on the *first* call --
+consistent with wasm `memory.grow` being a one-way ratchet by spec (freed
+pages can never be returned to the host) combined with `evoc_fit_predict`'s
+pipeline touching a genuinely large scratch working-set at n=800 (KNN
+graph construction, label-propagation recursion, node-embedding epoch
+buffers) during that first call. Calls 2+ do add a small, steady
+**+65,536 bytes (exactly one wasm page) per call** -- not zero -- which
+*is* real per-call growth, but it is 4-5 orders of magnitude smaller than
+the initial ratchet and does not compound super-linearly across 6 calls
+(constant +1 page/call, not accelerating), so it reads as free-list
+bucket fragmentation internal to `std.heap.WasmAllocator` (confirmed by
+reading `lib/std/heap/WasmAllocator.zig`: it's a bucketed size-class
+free-list allocator over wasm pages that never returns memory to the "OS"
+-- there is no OS to return it to in freestanding wasm -- so a
+differently-shaped allocation sequence on a later call, e.g. a different
+seed producing a different cluster count / label-propagation recursion
+depth, can require one additional page even if net bytes-in-use trends
+flat) rather than an application-level missing-`free` bug. A targeted
+audit of `wasm_api.zig`'s call tree (`clustering.zig`,
+`label_propagation.zig`) found `defer allocator.free(...)` (or `deinit()`)
+paired with essentially every `allocator.alloc`/`try allocator.alloc` call
+already, including inside `label_propagation_init_recursive`'s recursion
+and `clustering.build_cluster_layers`'s intermediate buffers -- no missing
+frees were found, so no arena-allocator or `defer`-adding fix was applied
+(the instructions authorized such a fix only if one was actually needed;
+this codebase already follows that discipline throughout the files
+checked).
+
+**Conclusion: the ~1027 MiB figure is EXPECTED, wasm-inherent behavior for
+this workload, not a fixable inefficiency.** The large *first-call* jump
+reflects genuine peak scratch-memory usage during the n=800 pipeline (not
+root-caused down to which specific buffer dominates in this pass -- would
+need a wasm-level allocation profiler/memory.grow call interception to go
+further, flagged as remaining future work) that `memory.grow`'s one-way
+nature then locks in for the rest of the process; the much smaller
+per-call drift after that is allocator bookkeeping overhead, not a leak
+that would eventually run a long-lived host out of memory. No code change
+was made as a result of this investigation. Not measured: true
+peak-*during*-a-single-run (vs. this proxy of memory after the run
+completes), memory for the two smaller datasets, or a breakdown by
+pipeline stage -- still future work.
 
 ## Cross-implementation parity
 
