@@ -3,11 +3,24 @@
 //! `label_propagation_init`'s recursive path reaches randomized PCA, which is
 //! intentionally NOT bit-parity with sklearn's internal randomized-SVD draws
 //! (see PORTING.md / PORT_NOTES.md / `rust/core/PCA_VALIDATION.md`). Instead
-//! this compares the Rust port's cluster labels against a real
+//! this compares the Rust port's cluster labels, across a **pre-registered
+//! panel of seeds 0..19**, against a real
 //! `evoc.EVoC(random_state=42).fit_predict(X)` run (recorded in
 //! `fixtures/clustering/evoc_clusters_e2e_ari_check.json` by
-//! `scripts/gen_evoc_clusters_ari_fixture.py`) via Adjusted Rand Index,
-//! with a pragmatic bar of ARI > 0.8.
+//! `scripts/gen_evoc_clusters_ari_fixture.py`) via Adjusted Rand Index.
+//!
+//! A single-seed ARI number is NOT trustworthy validation on its own: a
+//! background measurement of Python's *own* seed-to-seed self-agreement
+//! (`scripts/measure_python_null.py`, cached in
+//! `fixtures/clustering/python_self_agreement_null.json`) found that
+//! `evoc.EVoC`'s output is itself broadly variable across `random_state`
+//! (median pairwise ARI ~0.52, p25/p75 0.42/0.63, min 0.07, max 0.95, across
+//! 190 pairs from 20 seeds on this exact dataset). Any single-seed
+//! port-vs-Python ARI (e.g. the old cherry-picked 0.8033 at seed 42) is thus
+//! nearly meaningless in isolation -- it could land anywhere in that range
+//! by chance alone, independent of port correctness. See
+//! `rust/core/PCA_VALIDATION.md` for the full methodology and gate
+//! reasoning.
 
 mod common;
 
@@ -106,8 +119,81 @@ fn ari_sanity_checks() {
     assert!((adjusted_rand_index(&a, &c) - 1.0).abs() < 1e-9);
 }
 
+/// Simple linear-interpolation percentile, matching
+/// `scripts/measure_python_null.py`'s `percentile()` (and thus how the
+/// cached null distribution's p25/median/p75 were computed) so the two
+/// distributions are directly comparable.
+fn percentile(sorted_vals: &[f64], p: f64) -> f64 {
+    if sorted_vals.is_empty() {
+        return f64::NAN;
+    }
+    let k = (sorted_vals.len() - 1) as f64 * (p / 100.0);
+    let f = k.floor() as usize;
+    let c = (f + 1).min(sorted_vals.len() - 1);
+    if f == c {
+        sorted_vals[f]
+    } else {
+        sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f as f64)
+    }
+}
+
+struct Distribution {
+    min: f64,
+    p25: f64,
+    median: f64,
+    p75: f64,
+    max: f64,
+}
+
+fn summarize(values: &[f64]) -> Distribution {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Distribution {
+        min: sorted[0],
+        p25: percentile(&sorted, 25.0),
+        median: percentile(&sorted, 50.0),
+        p75: percentile(&sorted, 75.0),
+        max: *sorted.last().unwrap(),
+    }
+}
+
+/// Pre-registered seed panel: seeds 0..19, the SAME 20 seeds used by
+/// `scripts/measure_python_null.py` to measure Python's own self-agreement
+/// null distribution. Fixed here (not chosen post-hoc) so the reported
+/// panel is a measurement, not a cherry-picked maximum.
+const SEED_PANEL: [i64; 20] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+];
+
+/// Measured null (`fixtures/clustering/python_self_agreement_null.json`):
+/// Python `evoc.EVoC`'s own pairwise ARI across random_state 0..19 on this
+/// exact dataset has median 0.5247, p25 0.4226, p75 0.6329, min 0.0746,
+/// max 0.9459 (190 pairs). This is Python disagreeing with ITSELF -- so a
+/// port that merely lands in a comparably broad range is not thereby
+/// buggy; the algorithm (small dataset, randomized PCA feeding a recursive
+/// label-prop/HDBSCAN-style extraction) is inherently seed-sensitive.
+const PYTHON_NULL_MEDIAN: f64 = 0.5246615432510635;
+
+/// Gate 1: the port's median ARI-vs-Python(seed 42) should be within a
+/// margin of Python's own median self-agreement. The margin (0.15) accounts
+/// for port-vs-Python not being quite the same comparison as
+/// Python-vs-Python (different implementation of the *same* algorithm,
+/// compared against one fixed Python reference run rather than pairwise
+/// among many Python runs) -- so some looseness relative to the null's own
+/// median is expected without indicating a port defect. This is NOT a bar
+/// requiring the port to beat Python's internal consistency; it only
+/// requires the port not be dramatically worse than Python is with itself.
+const MEDIAN_GATE: f64 = PYTHON_NULL_MEDIAN - 0.15; // ~0.3747
+
+/// Gate 2: floor on the panel minimum, as a smoke alarm for pathological
+/// seeds (e.g. total misclustering, empty labels, a crash-adjacent
+/// degenerate case) rather than "ordinary" seed-sensitivity. Set loosely
+/// below Python's own observed floor (0.0746) since with only 20 samples
+/// per side we should not expect our floor to exceed Python's.
+const MIN_GATE: f64 = 0.15;
+
 #[test]
-fn evoc_clusters_e2e_ari_against_python_evoc() {
+fn evoc_clusters_e2e_ari_panel_against_python_evoc() {
     let fixture = load("clustering", "evoc_clusters_e2e_ari_check");
     let n_samples = fixture["n_samples"].as_u64().unwrap() as usize;
     let n_features = fixture["n_features"].as_u64().unwrap() as usize;
@@ -118,29 +204,54 @@ fn evoc_clusters_e2e_ari_against_python_evoc() {
     assert_eq!(python_labels.len(), n_samples);
 
     // evoc.EVoC()'s own defaults, matching the fixture generator script.
-    let opts = EvocClustersOptions {
-        noise_level: 0.5,
-        base_min_cluster_size: 5,
-        n_neighbors: 15,
-        min_samples: 5,
-        n_epochs: 50,
-        neighbor_scale: 1.0,
-        min_similarity_threshold: 0.2,
-        max_layers: 10,
-        n_label_prop_iter: 20,
-        node_embedding_dim: None,
-    };
+    fn opts() -> EvocClustersOptions {
+        EvocClustersOptions {
+            noise_level: 0.5,
+            base_min_cluster_size: 5,
+            n_neighbors: 15,
+            min_samples: 5,
+            n_epochs: 50,
+            neighbor_scale: 1.0,
+            min_similarity_threshold: 0.2,
+            max_layers: 10,
+            n_label_prop_iter: 20,
+            node_embedding_dim: None,
+        }
+    }
 
-    let mut evoc = EVoC::new(42, opts);
-    let rust_labels = evoc.fit_predict(&data, n_features).to_vec();
+    let mut aris: Vec<f64> = Vec::with_capacity(SEED_PANEL.len());
+    for &seed in SEED_PANEL.iter() {
+        let mut evoc = EVoC::new(seed, opts());
+        let rust_labels = evoc.fit_predict(&data, n_features).to_vec();
+        let ari = adjusted_rand_index(&python_labels, &rust_labels);
+        eprintln!("  seed {seed:>2}: ARI vs Python(seed=42) = {ari:.4}");
+        aris.push(ari);
+    }
 
-    let ari = adjusted_rand_index(&python_labels, &rust_labels);
-    eprintln!("evoc_clusters e2e ARI against Python evoc.EVoC: {ari:.4}");
+    let dist = summarize(&aris);
+    eprintln!(
+        "evoc_clusters e2e ARI panel (Rust, seeds 0..19) vs Python evoc.EVoC(seed=42): \
+         min={:.4} p25={:.4} median={:.4} p75={:.4} max={:.4}",
+        dist.min, dist.p25, dist.median, dist.p75, dist.max
+    );
+    eprintln!(
+        "  (Python-vs-Python self-agreement null: median={PYTHON_NULL_MEDIAN:.4}; \
+         median gate = null_median - 0.15 = {MEDIAN_GATE:.4}; min gate = {MIN_GATE:.4})"
+    );
 
     assert!(
-        ari > 0.8,
-        "expected ARI > 0.8 against Python evoc.EVoC reference labels, got {ari:.4}. \
-         See PCA_VALIDATION.md: this is a pragmatic quality bar, not bit-exact parity \
-         (impossible once randomized PCA diverges from sklearn's internal SVD draws)."
+        dist.median >= MEDIAN_GATE,
+        "panel median ARI {:.4} < gate {:.4} (Python self-agreement null median {:.4} - 0.15 \
+         margin). See PCA_VALIDATION.md's panel methodology section.",
+        dist.median,
+        MEDIAN_GATE,
+        PYTHON_NULL_MEDIAN
+    );
+    assert!(
+        dist.min >= MIN_GATE,
+        "panel min ARI {:.4} < floor {:.4}; a pathological seed suggests a real bug, not just \
+         ordinary seed-sensitivity. See PCA_VALIDATION.md.",
+        dist.min,
+        MIN_GATE
     );
 }

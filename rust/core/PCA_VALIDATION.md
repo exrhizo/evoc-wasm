@@ -63,21 +63,19 @@ takes the approach below instead of skipping it.
      (`low_rank_reconstruction_quality`), plus a basic output-shape check and
      a standard-normal-draw sanity check (mean/variance) for the Box-Muller
      sampler `pca.rs` uses to build the random projection matrix.
-   - **End-to-end Adjusted Rand Index (ARI) check against real Python
-     `evoc.EVoC`** (`rust/core/tests/evoc_clusters_ari.rs`): a synthetic
-     dataset is clustered by both the real Python reference
-     (`evoc.EVoC(random_state=...).fit_predict(X)`, cached as a fixture --
-     see below) and this Rust port's `EVoC::fit_predict`, and the two label
-     assignments are compared via ARI. The bar is **ARI > 0.8**, chosen
-     pragmatically: 1.0 (bit-exact cluster assignment) is not a meaningful
-     target once the PCA leg diverges, since that divergence changes every
-     downstream RNG draw in the recursive pipeline (a different `tau_rand`
-     draw sequence than numpy's MT means the *exact* label-propagation
-     partitions, node-embedding coordinates, and therefore cluster
-     boundaries can differ even though the overall clustering quality is
-     comparable). >0.8 is a strong-agreement bar for two different
-     algorithms clustering the same data, not a "good enough, don't look
-     too closely" threshold.
+   - **End-to-end Adjusted Rand Index (ARI) panel against real Python
+     `evoc.EVoC`** (`rust/core/tests/evoc_clusters_ari.rs`,
+     `zig/src/clustering.zig`): a synthetic dataset is clustered by both the
+     real Python reference (`evoc.EVoC(random_state=42).fit_predict(X)`,
+     cached as a fixture -- see below) and this port's `EVoC::fit_predict`
+     run across a **pre-registered panel of 20 seeds (0..19)**, and each of
+     the 20 label assignments is compared against the cached Python labels
+     via ARI. The panel distribution (min/p25/median/p75/max) is asserted
+     against gates derived from a measured null rather than a single
+     cherry-picked seed against a fixed threshold -- see the "Python-vs-Python
+     null" section below for the full history of why this replaced the
+     original single-seed >0.8 bar, and "Panel results" for current numbers
+     and gate definitions.
 
 ## Fixture dataset and why it isn't `make_blobs` verbatim
 
@@ -101,18 +99,12 @@ which keeps each cluster's direction distinct after row-normalization --
 matching the kind of CLIP-vector-like embedding data `evoc` targets in
 practice. With this dataset (6 clusters x 40 points, 24 features,
 `noise_scale=0.5`, `center_scale=6.0`, seed 7) both the Python reference and
-this Rust port recover clean, well-separated clusterings and the ARI comes
-out at:
-
-```
-evoc_clusters e2e ARI against Python evoc.EVoC: 0.8033
-```
-
-(see `rust/core/tests/evoc_clusters_ari.rs::evoc_clusters_e2e_ari_against_python_evoc`,
-asserted `> 0.8`). The fixture JSON
-(`fixtures/clustering/evoc_clusters_e2e_ari_check.json`) caches both the
-input data and the Python reference labels so the Rust test suite never
-needs a live Python/sklearn/numba environment to run.
+this port recover clean, well-separated clusterings. (The original
+single-seed number reported here, "ARI 0.8033 at seed 42," has been
+superseded by the seed-panel methodology below -- see "Panel results.") The
+fixture JSON (`fixtures/clustering/evoc_clusters_e2e_ari_check.json`) caches
+both the input data and the Python reference labels (`random_state=42`) so
+the test suite never needs a live Python/sklearn/numba environment to run.
 
 ## Regenerating the fixture
 
@@ -142,24 +134,88 @@ environment with those packages plus the `evoc` reference source on
 - DOES claim: the randomized PCA is a faithful implementation of the
   published Halko/Martinsson/Tropp algorithm, its reconstruction quality
   meets a reasonable bar on synthetic low-rank data, and the full
-  `evoc_clusters` pipeline built on top of it produces clusterings in
-  strong agreement (ARI > 0.8) with the real Python reference on a
-  representative (if hand-tuned for cosine-friendliness) synthetic dataset.
+  `evoc_clusters` pipeline built on top of it produces clusterings whose
+  agreement with the real Python reference, measured across a pre-registered
+  20-seed panel, is not dramatically worse than Python's own measured
+  seed-to-seed self-agreement on the same representative (if hand-tuned for
+  cosine-friendliness) synthetic dataset -- see "Panel results" below.
 
 ## Python-vs-Python null: how variable is Python's own output?
 
-The single-seed ARI numbers above (Rust 0.80 @ seed 42, Zig 0.89 @ seed 29,
-observed range 0.51-0.89 across seeds tried) are a single sample each and
-not trustworthy validation on their own. `scripts/measure_python_null.py`
-measures whether Python's *own* `evoc.EVoC.fit_predict` is this variable
-run-to-run, on the exact same X as the ARI fixture: pairwise ARI across
+The original single-seed ARI numbers (Rust 0.80 @ seed 42, Zig 0.89 @ seed
+29, observed range 0.51-0.89 across seeds tried informally) were each a
+single sample and not trustworthy validation on their own -- a single seed's
+ARI-vs-Python could land almost anywhere in a wide range by chance alone,
+independent of port correctness. `scripts/measure_python_null.py` measures
+whether Python's *own* `evoc.EVoC.fit_predict` is this variable run-to-run,
+on the exact same X as the ARI fixture: pairwise ARI across
 `EVoC(random_state=s)` for s in 0..19 (190 pairs), results cached in
 `fixtures/clustering/python_self_agreement_null.json`. Result: Python's own
-self-agreement is broad -- median ARI 0.52, p25/p75 0.42/0.63, min 0.07,
-max 0.95, mean 0.50, std 0.20 -- comparable to (and on the low end, broader
-than) the port's observed spread. This indicates the port's seed-to-seed
-variability is largely inherent algorithm stochasticity (small dataset,
-randomized PCA, HDBSCAN-style cluster extraction all being seed-sensitive),
-not primarily a port quality gap. Full seed-panel comparison of Rust/Zig
-against this null is left to a follow-up task; see VALIDATION_PLAN.md
-section 2A.
+self-agreement is broad:
+
+| stat | value |
+|------|-------|
+| min | 0.0746 |
+| p25 | 0.4226 |
+| median | 0.5247 |
+| p75 | 0.6329 |
+| max | 0.9459 |
+| mean | 0.5034 |
+| std | 0.1972 |
+
+This indicates the port's seed-to-seed variability observed earlier was
+largely inherent algorithm stochasticity (small dataset, randomized PCA,
+HDBSCAN-style cluster extraction all being seed-sensitive), not primarily a
+port quality gap -- confirmed below by the full seed-panel comparison.
+
+## Panel results: pre-registered 20-seed comparison against the null
+
+Per VALIDATION_PLAN.md section 2B, the single-seed ARI tests were replaced
+with a pre-registered panel: `EVoC::fit_predict`/`evoc_clusters` is run for
+seeds 0..19 (the SAME 20 seeds used to measure the Python self-agreement
+null above, fixed in advance, not chosen post-hoc) on the same fixture
+dataset, and each run's labels are compared via ARI against the cached
+Python reference labels (`random_state=42`,
+`fixtures/clustering/evoc_clusters_e2e_ari_check.json`). Implemented in
+`rust/core/tests/evoc_clusters_ari.rs::evoc_clusters_e2e_ari_panel_against_python_evoc`
+and `zig/src/clustering.zig`'s `"evoc_clusters e2e ARI panel against Python
+evoc.EVoC"` test.
+
+**Gates** (pre-registered, applied identically to both languages):
+
+- `median(ARI_port↔py) >= median(ARI_py↔py) - 0.15` = `0.5247 - 0.15` =
+  **0.3747**. The 0.15 margin accounts for port-vs-Python(seed 42) not being
+  quite the same comparison as the null's Python-vs-Python pairwise measure
+  (a different implementation of the same algorithm, compared against one
+  fixed reference run rather than averaged pairwise over many Python runs).
+  This gate does NOT require the port to beat Python's own internal
+  consistency -- only to not be dramatically worse than Python is with
+  itself.
+- `min(ARI_port↔py) >= 0.15` over the panel, a floor calibrated loosely
+  below Python's own observed floor (0.0746) as a smoke alarm for
+  pathological/broken seeds (e.g. a crash-adjacent degenerate clustering)
+  rather than ordinary seed-sensitivity.
+
+**Results:**
+
+| language | seeds | min | p25 | median | p75 | max |
+|----------|-------|------|------|--------|------|------|
+| Python self-null (py vs py) | 0..19 (190 pairs) | 0.0746 | 0.4226 | 0.5247 | 0.6329 | 0.9459 |
+| Rust (vs Python seed=42) | 0..19 (20 runs) | 0.2637 | 0.4851 | 0.7500 | 0.8737 | 0.9459 |
+| Zig (vs Python seed=42) | 0..19 (20 runs) | 0.5147 | 0.6915 | 0.7514 | 0.7841 | 0.8678 |
+
+Both ports comfortably clear both gates (median gate 0.3747, min gate
+0.15). Notably, both ports' median ARI-vs-Python (0.75) *exceeds* Python's
+own median self-agreement (0.52) -- plausible since each port is compared
+against one fixed, relatively "typical" Python reference run rather than
+averaged pairwise against 19 other equally-random Python runs, so this is
+not evidence the port is "better than Python," just a reflection of the
+different comparison structure (fixed reference vs. all-pairs). Zig's panel
+is additionally tighter (narrower IQR, higher min) than Rust's on this
+dataset; both are within the pass region and this difference is not
+currently investigated further (see VALIDATION_PLAN.md section 2D for
+planned Rust-vs-Zig direct comparison, which is a stronger/cheaper signal
+than either port's ARI-vs-Python and remains a follow-up).
+
+This panel-vs-null comparison supersedes the single-seed claims (Rust 0.8033
+@ seed 42, Zig 0.8930 @ seed 29) throughout this document and `STATUS.md`.
