@@ -121,4 +121,22 @@ Legend: ✅ done · 🚧 in progress · — not started
   implementation detail unrelated to the evoc algorithm itself. Rust's
   status on this specific point is unknown to this (Zig-only) note.
 
+- **New (validation, section 2D):** Rust vs Zig `EVoC::fit_predict` are NOT
+  bit-identical (checked across seeds 0..19 on
+  `fixtures/clustering/evoc_clusters_e2e_ari_check.json`); median
+  ARI(Rust,Zig) is 0.6704 (range 0.1177-0.8512). First divergence is in
+  `knn_graph`'s seed-0 output: neighbor indices match bit-for-bit but
+  neighbor distances differ by up to `1.49e-8` (float32-ULP noise from
+  independent summation order, not an algorithmic bug), which compounds
+  through the rest of the self-driven pipeline. Also found (not fixed, out
+  of scope for this validation pass): `evoc_clusters`/`EVoC::new` in both
+  languages seed their tausworthe RNG directly from the caller's integer
+  seed via the low-level `seed()` port, whose masks make ~half of adjacent
+  integer seeds (e.g. 1 and 2) produce byte-identical RNG streams forever
+  -- real `evoc.EVoC` avoids this by routing `random_state` through NumPy's
+  `RandomState.randint` first. Full writeup, thresholds, and reasoning in
+  `rust/core/PCA_VALIDATION.md`, "Cross-language (Rust vs Zig) agreement".
+  Regression check: `scripts/compare_rust_zig_evoc_clusters.sh` (gates on
+  median ARI >= 0.5; not yet wired into `scripts/check_all.sh`).
+
 Comparison results: see `comparison/results.md` (phase 10).

@@ -219,3 +219,111 @@ than either port's ARI-vs-Python and remains a follow-up).
 
 This panel-vs-null comparison supersedes the single-seed claims (Rust 0.8033
 @ seed 42, Zig 0.8930 @ seed 29) throughout this document and `STATUS.md`.
+
+## Cross-language (Rust vs Zig) agreement
+
+Per VALIDATION_PLAN.md section 2D, this checks Rust's and Zig's
+`EVoC::fit_predict` directly against each other (same fixture, same seed
+panel 0..19), rather than each against Python. This is a stronger/cheaper
+signal than either port's ARI-vs-Python: `tau_rand` itself was already
+verified bit-identical between the two languages in phases 1-8, and both
+languages implement the same "self-driven" pipeline structure (one
+`tau_rand` state threaded through RP-tree/NN-descent sampling, label-prop
+partition seeding, randomized PCA, and node-embedding SGD), so it was a
+live, previously-untested question whether the two ports would produce
+bit-identical output given the same seed.
+
+**Method:** `rust/core/tests/dump_evoc_clusters_labels_for_cross_lang.rs`
+(a `#[ignore]`d, manually-run test, not part of `cargo test --workspace`)
+and `zig/src/dump_evoc_clusters_labels_for_cross_lang.zig` (a standalone
+harness file, not wired into `root.zig`/`zig build test`) each run
+`EVoC::fit_predict`/`EVoC.fit_predict` for seeds 0..19 on
+`fixtures/clustering/evoc_clusters_e2e_ari_check.json` and dump labels (plus,
+for seed 0 only, the raw `nn_inds`/`nn_dists` from the first pipeline stage,
+`knn_graph`) to JSON. `scripts/compare_rust_zig_evoc_clusters.py` diffs the
+two dumps: partition equality (labels compared up to an arbitrary
+permutation of cluster ids, not raw integer equality) and, where not
+identical, Adjusted Rand Index. `scripts/compare_rust_zig_evoc_clusters.sh`
+runs the whole pipeline end to end (both dumps + the comparison) and is the
+regression check (exit non-zero on failure); it is not currently wired into
+`scripts/check_all.sh` by default (skips gracefully if `zig` isn't on
+`PATH`) but can be, or run standalone.
+
+**Result: NOT bit-identical on any of the 20 seeds.**
+
+| | min | p25 | median | p75 | max |
+|---|------|------|--------|------|------|
+| ARI(Rust, Zig), seeds 0..19 | 0.1177 | 0.3781 | 0.6704 | 0.7073 | 0.8512 |
+
+**Where the divergence starts:** the very first stochastic pipeline stage.
+For seed 0, `knn_graph`'s output neighbor *indices* (`nn_inds`) are
+bit-identical between Rust and Zig (all 3600 values), but the neighbor
+*distances* (`nn_dists`) are not: 30/3600 values differ, by at most
+`1.49e-8` in absolute terms -- i.e. float32-ULP-scale noise, not a
+structural/algorithmic difference. This is consistent with ordinary
+floating-point non-associativity between two independently-written,
+same-algorithm float32 implementations (e.g. summation order in row
+normalization or the cosine-distance dot product) rather than a bug: the
+two ports were never claimed or required to be bit-exact here (fixture-based
+"exact" parity in phases 1-8 only applies when the RNG state is supplied
+externally as fixture input, keeping every downstream computation's operand
+order pinned; the self-driven pipeline recomputes those operands from
+scratch in each language, so tiny ordering differences are expected). The
+same ULP-scale noise, propagated through NN-descent/RP-tree candidate
+selection (which can flip on ties), randomized PCA, label propagation, and
+node-embedding SGD, compounds into the substantially different final
+partitions above -- consistent with, not contradicted by, the existing
+finding that this pipeline is itself fairly seed-sensitive even
+*within* one language (see the Python self-agreement null above, and
+Rust's/Zig's own ARI-vs-Python spread).
+
+**Threshold chosen:** `compare_rust_zig_evoc_clusters.sh` gates on
+`median(ARI_rust↔zig) >= 0.5`. This is calibrated from what was actually
+observed (median 0.67, min 0.12), not picked to make a pre-decided number
+pass: it sits below the observed median with real margin, so it functions
+as a drift detector for a future change that meaningfully breaks
+cross-language agreement (e.g. an accidental algorithmic divergence, not
+just ULP noise), while tolerating the inherent seed-to-seed variance already
+established by the Python self-agreement null (whose own min was 0.0746
+across a wider 190-pair sample). It intentionally does NOT require
+bit-identical output, which this investigation found is not the current
+(or an easily reachable) state.
+
+**Separate finding, NOT fixed here (out of scope for a validation pass --
+flagged per this task's instructions instead of silently patched):** while
+generating the seed panel, both Rust's and Zig's dumps showed IDENTICAL
+final labels for seed pairs `(1,2)`, `(3,4)`, `(5,6)`, ..., `(17,18)` --
+i.e. consecutive odd/even seed pairs collapse to the exact same output,
+independently in both languages. This traces to `rng::seed`/`rng.zig`'s
+`seed` function (`rng_state.fill(s + 0xFFFF)`), which is a faithful, already
+bit-verified port of `evoc/common_nndescent.py`'s `seed()`. The bug is not
+in the port of that function -- it's in how `evoc_clusters`/`EVoC::new` use
+it: they call this low-level `seed()` directly with the caller's top-level
+seed to initialize the tausworthe state. But `tau_rand_int`'s masks
+(`0xFFFFFFFE`, `0xFFFFFFF8`, `0xFFFFFFF0` for lanes 0/1/2 respectively) clear
+each lane's lowest 1/3/4 bits on first use and every use thereafter, so two
+seeds differing only in those masked-off low bits (e.g. `1` and `2`, whose
+`+0xFFFF`-shifted values `0x10001`/`0x10000` differ only in bit 0) produce
+byte-for-byte identical RNG streams forever after. The real Python
+`evoc.EVoC` does NOT do this: it uses
+`sklearn.utils.check_random_state(random_state)` to get a NumPy
+`RandomState`, then builds the internal `rng_state` array via
+`current_random_state.randint(INT32_MIN, INT32_MAX, 3)` (see
+`evoc/knn_graph.py`) -- i.e. the user-facing seed only ever seeds NumPy's
+Mersenne Twister, which is then sampled to produce a well-distributed
+tausworthe state, never handed directly to the low-level `seed()` function.
+Both ports' "self-driven" substitution (documented elsewhere in this file as
+an intentional, already-approximate stand-in for NumPy's RNG, since matching
+NumPy's Mersenne Twister bit-for-bit is out of scope) took a shortcut that
+happens to make ~half of all adjacent integer seeds statistically
+non-independent of each other. This does not affect the cross-language
+comparison's validity (Rust and Zig exhibit the exact same collapsing
+behavior, symmetrically, so the 20-seed panel above is genuinely 11
+distinct effective seeds tested twice each in both languages, not a bug
+that differs by language) but is worth a future fix (e.g. drawing 3
+well-separated `tau_rand_int` values from a `seed()`-initialized *scratch*
+state to build the real starting `rng_state`, mirroring what
+`current_random_state.randint(...)` achieves) if finer-grained seed control
+ever matters (e.g. for the seed panels used throughout this validation
+effort, or for downstream users relying on `random_state` for genuinely
+independent runs).
