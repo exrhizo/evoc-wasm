@@ -1,5 +1,44 @@
 # PCA / `evoc_clusters` validation methodology (phase 9)
 
+## Executive summary
+
+- `evoc_clusters`/`EVoC::fit_predict` cannot be bit-exact vs. Python (sklearn's
+  PCA internals aren't a replayable surface), so it's validated statistically
+  instead. See sections below for full detail; this is the short version.
+- **Measured a null first:** Python's own seed-to-seed self-agreement (ARI
+  across 20 of its own runs) has median 0.52, range 0.07-0.95 on the primary
+  fixture dataset. This means single-seed ARI numbers (the old "Rust 0.80,
+  Zig 0.89" claims) were nearly meaningless on their own -- replaced with
+  pre-registered 20-seed panels gated against this null.
+- **Both ports pass** the panel gates on the original dataset and on 4
+  additional dataset shapes (varying n/dims/cluster count/balance/noise) --
+  see "Panel results" and "Dataset panel".
+- **Rust vs. Zig are NOT bit-identical** to each other, even though both are
+  driven by the same (already bit-verified) `tau_rand` RNG. Traced to
+  float32-ULP-scale summation-order noise in the very first pipeline stage
+  (`knn_graph`), which compounds through the seed-sensitive pipeline to a
+  median cross-language ARI of 0.67. See "Cross-language agreement".
+- **Two real findings surfaced, deliberately not silently patched:**
+  1. A seed-collision bug: `evoc_clusters`/`EVoC::new` seed the tausworthe
+     state directly from the caller's integer instead of routing through a
+     `RandomState`-style intermediate step like Python does, so ~half of all
+     adjacent integer seeds (e.g. 1 and 2) produce byte-identical RNG streams
+     in both languages. Low priority unless independent seed control matters.
+  2. Scale invariance fails: multiplying input rows by a positive constant
+     should be a no-op (cosine-distance row-normalization) but isn't exactly
+     one in float32, and that ULP noise compounds the same way the
+     cross-language divergence does. Both findings point at the same root
+     cause -- this pipeline is highly sensitive to any ULP-scale perturbation
+     of its inputs, from whatever source. Neither was fixed here (validation
+     work only); both are documented with disabled regression tests ready to
+     re-enable once addressed.
+- **Practical takeaway:** the port's quality is not distinguishable from
+  Python's own inherent run-to-run variability on this class of algorithm at
+  small-to-medium dataset sizes. That is a real, evidence-based conclusion,
+  not an excuse -- but it also means "ARI > 0.8" was never the right bar to
+  begin with, and the seed-collision/ULP-sensitivity findings above are the
+  more actionable next steps if tighter agreement is wanted later.
+
 This document exists because phase 9 (`evoc_clusters`/`EVoC::fit_predict`,
 `rust/core/src/pca.rs` + `rust/core/src/clustering.rs`) is validated
 **differently** from every other component in this port. Read this before
