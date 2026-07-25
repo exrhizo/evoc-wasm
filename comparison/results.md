@@ -508,3 +508,247 @@ weighted into this recommendation.
 This is not a toss-up: the wasm-specific execution-time gap in particular
 is large and consistent across all three dataset sizes, not a close call
 that could flip with measurement noise.
+
+## Scaling to 10k-30k points
+
+Exploratory investigation (no VALIDATION_PLAN.md changes) into whether this
+port can realistically handle n=10,000-30,000 points in the browser, and
+what would need to change if not. Prior benchmarking (above) only went up
+to n=800. This section uses fresh synthetic datasets, NOT Python-validated
+labels (re-running the slow Python reference at these sizes wasn't needed
+to answer a performance question) -- see `scripts/gen_scale_test_data.py`
+(same cosine-friendly orthogonal-axis-centers construction as the ARI/panel
+fixture generators; n in {2000, 10000, 30000}, d=32, 8 clusters, not
+committed -- multi-MB `.f32` blobs regenerable by rerunning the script,
+`scripts/scale_data/` is gitignored). Benchmark harness:
+`scripts/wasm_scale_benchmark.mjs [n1,n2,...]`.
+
+### Headline answer
+
+**Yes -- both wasm builds' `evoc_fit_predict`/`evoc_clusters` complete at
+n=30000 comfortably within budget, after one real fix (below).** Before the
+fix, n=30000 would not have completed at all (see "The bug" below) -- it
+would have attempted to allocate ~7.2 GB for a single buffer, blowing past
+wasm32's entire 4 GiB linear-memory address space. After the fix:
+
+| n | rust `wasm_evoc_fit_predict` | rust memory | zig `evoc_fit_predict` | zig memory |
+|---|---|---|---|---|
+| 2,000 | 288 ms | 539 MiB | 154 ms | 1031 MiB |
+| 10,000 | 865 ms | 545 MiB | 831 ms | 1056 MiB |
+| 30,000 | 2.78 s | 562 MiB | 2.68 s | 1123 MiB |
+
+(Single timed run per cell, fresh wasm instance per call so the memory
+reading is that call's own footprint, not cumulative growth across prior
+calls in the same process -- wasm linear memory only grows, never shrinks,
+so reusing one instance across many benchmark calls would otherwise report
+misleadingly high numbers. Pipeline params: `n_neighbors=15,
+min_samples=5, n_epochs=50, base_min_cluster_size=5, seed=0`, matching
+`scripts/wasm_benchmark.mjs`'s existing convention.)
+
+Both languages stay well under a second up to n=10000 and under 3 seconds
+at n=30000 -- solidly "usable" by any reasonable browser-interaction
+standard, and memory is nowhere near the 4 GiB wasm32 ceiling at any tested
+size (562 MiB / 1123 MiB peak at n=30000, ~14%/28% of the ceiling). The
+math on that ceiling, worked out *before* running n=30000 (per the task's
+instruction to avoid an OOM-crash surprise): a naive dense n x n f64
+distance/affinity matrix at n=30000 is `30000^2 * 8 bytes = 7.2 GB` --
+already 1.8x the entire address space on its own, before any other
+allocation. That number turned out to be exactly the shape of the real bug
+found below, not a hypothetical.
+
+### The bug: O(n^2) dense-matrix allocation in `label_propagation_init_recursive`
+
+`rust/core/src/label_propagation.rs`'s `partition_expander` upscaling step
+(the tail of `label_propagation_init_recursive`, the function that seeds
+`node_embedding`'s initial layout) used to build a **dense `n_points x
+n_points` `f64` matrix** (`graph_dense`, `8 * n_points^2` bytes) plus an
+O(n_points^2) double loop over it, at the FULL top-level `n_points` (not
+the reduced/coarsened graph size) on every top-level call:
+
+```rust
+let mut graph_dense = vec![0.0f64; n_points * n_points];   // <- 7.2 GB at n=30000
+for i in 0..n_points {
+    for j in 0..n_points {
+        let m_ij = graph_dense[i * n_points + j] * graph_dense[j * n_points + i];
+        ...
+```
+
+At n=2000 this is "only" 32 MB, invisible against the ~500 MB baseline
+described below. At n=30000 it is 7.2 GB for the buffer alone --
+guaranteed OOM before wasm32's 4 GiB address space is even accounted for
+by anything else in the pipeline. This was caught by doing the memory math
+in step 2 of this investigation *before* running n=30000, then grepping
+`label_propagation.rs`/`pca.rs`/`clustering.rs`/`graph_construction.rs`
+for exactly this shape of allocation (`n * n`, `n_samples * n_samples`,
+dense `Vec<Vec<_>>`) per the task's checklist -- this is the smoking gun.
+
+**Zig's port of the same function (`zig/src/label_propagation.zig`'s
+`partition_expander` block) does NOT have this bug.** It never
+materializes the dense matrix -- it walks each row's sparse CSR entries
+directly and looks up the transposed entry `graph[j][i]` via a per-row
+`csrGet` scan/binary-search, using an O(n_parts)-sized scratch row buffer
+instead of an O(n_points^2) one. This is very likely *why* the original
+memory comparison in this file's "Recommendation" section found Zig's
+footprint puzzlingly ~2x Rust's on the largest *then-tested* dataset (800
+points) despite Zig being faster -- at n=800 the dense bug is small (5 MB),
+so it wasn't the dominant term there, but it's exactly the kind of
+asymmetry that predicts a much larger gap emerging at scale, which this
+investigation confirms independently (the bug, not that specific old
+memory comparison, since 800 was too small to see it clearly).
+
+**Fix applied** (`rust/core/src/label_propagation.rs`, the
+`partition_expander` block): replaced the dense matrix with the same
+sparse-row-lookup approach Zig already uses -- walk `i`'s CSR row directly
+(already sparse, `nnz` entries total, not `n_points` per row), and look up
+`graph[j][i]` with a linear scan of `j`'s CSR row (a linear scan, not
+Zig's binary search, because this port's `smmp` output CSR rows are
+explicitly documented as NOT column-sorted -- see `smmp`'s doc comment a
+few lines above; a binary search would have silently produced wrong
+results on unsorted rows). Row degree here is small and bounded (kNN-graph
+derived, `n_neighbors=15` by default), so this is O(n_points * degree^2)
+in the worst case and effectively linear in practice, not O(n_points^2).
+
+This function (`label_propagation_init_recursive`) is explicitly
+documented as ARI-validated against Python, not bit-exact
+fixture-validated (PCA's randomized SVD makes bit-exactness impossible
+here regardless -- see PCA_VALIDATION.md), so a numerically-equivalent
+algorithmic rewrite is in scope without the bit-exact caution that applies
+to phase 1-8 fixture-parity files. Verified after the fix:
+`cargo test --workspace` (92+ tests, all pass), `zig build test`
+(untouched, still passes), and `node scripts/wasm_fixture_runner.mjs`
+(both languages, all non-skipped checks pass, INCLUDING the ARI panel gate
+that would catch a correctness regression: rust median ARI 0.6032 / min
+0.3929 against gates of >=0.3747 / >=0.15, unchanged in shape from before
+the fix). `bash scripts/check_all.sh` passes end to end.
+
+### Per-stage profiling
+
+Standalone stage benchmarks (`wasm_knn_graph`/`knn_graph`,
+`wasm_boruvka_mst`/`boruvka_mst`, `wasm_cluster_tree_labels`/
+`cluster_tree_labels`, `wasm_node_embedding`/`node_embedding`), all now
+exported by both languages (unlike the note in the older
+`wasm_benchmark.mjs`, which predates Zig's node_embedding/knn_graph/
+cluster-tree exports landing):
+
+| stage | n=2,000 | n=10,000 | n=30,000 | rust complexity read |
+|---|---|---|---|---|
+| `knn_graph` (rust / zig) | 216 / 57 ms | 465 / 292 ms | 1.14 / 0.98 s | grows ~5x for 3x n (2000->10000) then ~2.5x for 3x n (10000->30000) -- roughly linearithmic, matches NN-descent's expected near-O(n log n), no red flag |
+| `boruvka_mst`, **raw d=32** (rust / zig) | 137 / 161 ms | 3.1 / 3.6 s | 27.0 / 29.9 s | grows ~23x for 5x n, then ~9x for 3x n -- worse than O(n log n), consistent with curse-of-dimensionality degrading the kd-tree's pruning at d=32 (approaches near-brute-force O(n^2 log n)-ish behavior as the tree stops usefully partitioning high-dim space) |
+| `cluster_tree_labels` (rust / zig) | 0.8 / 1.4 ms | 2.3 / 6.3 ms | 5.5 / 13.4 ms | sub-linear-looking growth, consistent with the documented O(log n) condensed-tree recursion depth -- no red flag |
+| `node_embedding` (rust / zig), synthetic k=15 graph | 128 / 107 ms | 759 / 653 ms | 2.55 / 2.22 s | roughly linear in n (n_epochs fixed at 50, negative_sample_rate fixed) -- matches the expected O(n_epochs * n * negative_sample_rate), no red flag |
+
+**Important caveat on the `boruvka_mst` row:** this standalone benchmark
+runs boruvka directly on the raw d=32 input, but the REAL end-to-end
+pipeline (`evoc_fit_predict`/`clustering.rs` line ~82) runs boruvka on the
+much lower-dimensional `node_embedding` output (`n_components`, default
+derived as `min(max(n_neighbors/4, 4), 15)` -- 8 in this benchmark's
+config), not the raw features. That's exactly why the end-to-end pipeline
+finishes n=30000 in 2.78s total while standalone boruvka alone takes 27s
+on the same n at the raw dimensionality -- **the standalone number is not
+representative of boruvka's real cost inside the actual pipeline**, it's
+a demonstration of how badly this specific kd-tree-based MST degrades at
+higher dimensionality, which is a real thing to know if anyone considers
+exposing/using standalone `boruvka_mst` directly on unreduced
+high-dimensional data.
+
+### Memory-ceiling math, revisited post-fix
+
+wasm32's linear memory address space caps at 4 GiB (`memory.grow` fails
+past that, unconditionally, independent of host RAM). Post-fix, measured
+peak at n=30000 is 562 MiB (rust) / 1123 MiB (zig) -- 14%/28% of the
+ceiling, both comfortably clear. The ~500-560 MiB (rust) / ~1030-1120 MiB
+(zig) baseline is present even at n=2000 and barely grows through
+n=30000 (539->562 MiB rust, a ~4% increase for a 15x increase in n; 1031->
+1123 MiB zig, ~9%) -- this reads as a large, roughly n-INDEPENDENT
+constant overhead (allocator behavior: wasm linear memory only grows, never
+returns pages, so a sequence of many differently-sized alloc/dealloc calls
+across the pipeline's many stages can ratchet memory usage up via
+fragmentation well beyond live-data size, and never give it back for the
+rest of that wasm instance's lifetime) rather than a scaling risk. It's
+real (a long-lived page keeping one wasm instance alive across many
+`fit_predict` calls will keep this memory pinned, and Zig's ~1 GiB
+baseline in particular is worth a closer look someday), but it is NOT what
+would block 10k-30k -- the O(n^2) bug above was the only actual blocker,
+and it's fixed. Extrapolating the now-flat per-call footprint, this port
+would likely handle n=100,000+ from a pure memory standpoint before
+approaching the 4 GiB ceiling; wall-clock time (see below) would become
+the binding constraint well before memory does.
+
+### Threading (SharedArrayBuffer + Web Workers) feasibility read
+
+Per VALIDATION_PLAN.md section 3 item 4, threading was already flagged as
+a "later" lever given COOP/COEP deployment friction. This investigation's
+profiling data doesn't change the priority call, but does say where
+threading WOULD help if pursued:
+
+- **`node_embedding`'s SGD is the best threading target if/when needed.**
+  It's the single largest contributor to end-to-end time at scale (2.2-2.6s
+  of the ~2.7s n=30000 total when run on the pipeline's actual
+  low-dimensional embedding-sized graph -- comparable in magnitude to
+  `knn_graph`), and the reference algorithm (UMAP-style negative sampling
+  SGD) is well known in the wild to parallelize across edges/negative
+  samples with only a lock-free "racy update" approach (accepted numeric
+  noise, same trick `pynndescent`/`umap-learn` use with numba's
+  `parallel=True`) -- embarrassingly parallel in principle, no sequential
+  dependency between one edge's update and another's within an epoch.
+- **`knn_graph` is a harder target.** NN-descent's candidate-refinement
+  loop has real cross-iteration data dependencies (each iteration's
+  candidate list depends on the previous iteration's converged neighbor
+  sets), and the RP-forest construction phase, while tree-parallel in
+  principle (each of the 4 trees is independent), is a small fraction of
+  total `knn_graph` time relative to the NN-descent refinement loop. Not
+  impossible, but meaningfully harder than `node_embedding`'s "just
+  parallelize the inner loop" shape.
+- **`boruvka_mst` is likely not worth threading at the pipeline's actual
+  operating point** (low-dimensional post-embedding data, where it's fast,
+  per the caveat above) -- it would matter more if the pipeline ever ran
+  boruvka on raw high-dimensional data directly, but that's not what
+  `evoc_fit_predict` does today.
+
+**Opinion: threading is not the next lever to pull.** At n=30000 the whole
+pipeline finishes in ~2.7s single-threaded, which is already well within
+"usable in a browser" territory; the ROI on the COOP/COEP deployment
+complexity threading requires isn't there yet at this scale. It becomes
+worth reconsidering if/when someone wants n=100k+ or wants sub-second
+p95 at n=30000 specifically for a snappier interactive feel -- at that
+point `node_embedding`'s SGD is the concrete target, not a vague "thread
+everything."
+
+### Prioritized next steps
+
+1. **(Done in this pass)** Fix the `label_propagation_init_recursive`
+   dense-matrix O(n^2) allocation in Rust (`label_propagation.rs`) --
+   this was the one real blocker for n=30000 and is now fixed;
+   `cargo test --workspace`, `zig build test`, and
+   `node scripts/wasm_fixture_runner.mjs` all still pass, including the
+   ARI correctness gate.
+2. **Investigate Zig's ~1 GiB baseline memory footprint.** Not urgent
+   (nowhere near the 4 GiB ceiling even at n=30000) but a ~2x-vs-Rust
+   constant overhead that shows up even at n=2000 is worth a dedicated
+   profiling pass -- likely `std.heap.WasmAllocator`'s size-class bucket
+   rounding combined with the same "memory only grows" dynamic discussed
+   above, compounded across this port's many small/short-lived
+   allocations per pipeline stage.
+3. **If sub-second p95 at n=30000 (or n=100k+) ever becomes a real
+   requirement, parallelize `node_embedding`'s SGD loop with
+   SharedArrayBuffer + Web Workers first** -- it's the single largest
+   remaining time contributor in the real (low-dimensional) pipeline
+   shape, and the algorithm is naturally suited to lock-free racy-update
+   parallelism. This is a "when it matters" item, not urgent at today's
+   ~2.7s/30k number.
+4. **If a future consumer wants standalone `boruvka_mst`/`knn_graph` on
+   RAW high-dimensional data (not the pipeline's internal low-dim
+   embedding),** budget for that being much slower than the numbers in
+   this section's end-to-end table suggest -- the 27-30s standalone
+   boruvka-at-d=32 number above is the real cost of that specific use
+   case, and would need either a curse-of-dimensionality-aware algorithm
+   change (e.g. dimensionality reduction before MST, which the pipeline
+   already effectively does) or acceptance of multi-second latency for
+   that specific standalone call.
+
+Artifacts from this pass: `scripts/gen_scale_test_data.py` (dataset
+generator, regenerate via `python3 scripts/gen_scale_test_data.py`),
+`scripts/wasm_scale_benchmark.mjs` (per-size, per-stage benchmark
+harness, `node scripts/wasm_scale_benchmark.mjs [n1,n2,...]`, defaults to
+2000,10000,30000). `scripts/scale_data/*.f32` (generated datasets) are
+gitignored, not committed -- multi-MB binary blobs, trivially regenerated.

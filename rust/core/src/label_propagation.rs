@@ -761,18 +761,53 @@ pub fn label_propagation_init_recursive(
     );
 
     // partition_expander upscaling (identical algebra to label_propagation_init).
-    let mut graph_dense = vec![0.0f64; n_points * n_points];
-    for i in 0..n_points {
-        for k in indptr[i] as usize..indptr[i + 1] as usize {
-            let j = indices[k] as usize;
-            graph_dense[i * n_points + j] = data[k] as f64;
+    //
+    // PERF NOTE: this used to materialize a dense `n_points x n_points` f64
+    // matrix (`graph_dense`) and a full O(n_points^2) double loop to compute
+    // `m_ij = graph[i][j] * graph[j][i]` for every (i, j) pair -- an
+    // allocation of `8 * n_points^2` bytes that is fine at the small n this
+    // path was originally exercised at, but scales catastrophically (e.g.
+    // ~7.2 GB at n_points=30000, exceeding wasm32's entire 4 GiB linear
+    // address space well before the rest of the pipeline even runs -- see
+    // comparison/results.md "Scaling to 10k-30k points"). `graph`/`data` are
+    // already a sparse CSR with only `nnz` nonzeros (nnz << n_points^2 for
+    // this pipeline's kNN-derived graphs), so `m_ij` is nonzero only when
+    // BOTH `graph[i][j]` and `graph[j][i]` are nonzero -- it suffices to
+    // walk i's sparse row and, for each neighbor j, look up `graph[j][i]`
+    // directly in j's sparse row instead of scanning every j. This graph
+    // can be either the base kNN-derived graph or (on recursive calls) the
+    // `smmp`-produced reduced graph, whose column order within a row is
+    // documented above (see `smmp`'s doc comment) as NOT sorted -- so this
+    // uses a linear scan of j's row (still O(row degree), not O(n_points))
+    // rather than a binary search, to stay correct regardless of column
+    // order. This is the same sparse-lookup idea
+    // zig/src/label_propagation.zig's `csrGet` uses for this exact step
+    // (that port's CSR rows happen to be canonical/sorted so it can binary
+    // search; this one can't assume that). Purely an algorithmic/memory
+    // change, same arithmetic per nonzero pair as the old dense version, so
+    // it does not affect this function's ARI validation (this whole
+    // function is ARI-validated against Python, not bit-exact
+    // fixture-validated, per the doc comment above).
+    fn csr_get(indptr: &[i64], indices: &[i64], data: &[f32], row: usize, col: i64) -> f64 {
+        let start = indptr[row] as usize;
+        let end = indptr[row + 1] as usize;
+        for k in start..end {
+            if indices[k] == col {
+                return data[k] as f64;
+            }
         }
+        0.0
     }
 
     let mut data_expander = vec![0.0f64; n_points * n_parts];
     for i in 0..n_points {
-        for j in 0..n_points {
-            let m_ij = graph_dense[i * n_points + j] * graph_dense[j * n_points + i];
+        let row_start = indptr[i] as usize;
+        let row_end = indptr[i + 1] as usize;
+        for k in row_start..row_end {
+            let j = indices[k] as usize;
+            let w_ij = data[k] as f64;
+            let w_ji = csr_get(indptr, indices, data, j, i as i64);
+            let m_ij = w_ij * w_ji;
             if m_ij != 0.0 {
                 let b = partition[j] as usize;
                 data_expander[i * n_parts + b] += m_ij * inv_sqrt_count[b];
