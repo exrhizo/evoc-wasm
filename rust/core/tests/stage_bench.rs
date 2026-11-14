@@ -4,16 +4,16 @@
 //! clustering.rs) inline so each stage can be wrapped in `Instant`; this
 //! file makes NO changes to non-test source. Safe to delete once the
 //! numbers are recorded.
-//!   cargo test --release -p uvoc-core --test stage_bench -- --ignored --nocapture
+//!   cargo test --release -p evoc-core --test stage_bench -- --ignored --nocapture
 
 use std::fs;
 use std::time::Instant;
-use uvoc_core::clustering::{build_cluster_layers, BuildClusterLayersOptions};
-use uvoc_core::graph_construction::neighbor_graph_matrix;
-use uvoc_core::knn_graph::knn_graph as knn_graph_impl;
-use uvoc_core::label_propagation::label_propagation_init_recursive;
-use uvoc_core::node_embedding::node_embedding_repr_self_driven;
-use uvoc_core::rng::{seed as rng_seed, tau_rand_int, RngState};
+use evoc_core::clustering::{build_cluster_layers, BuildClusterLayersOptions};
+use evoc_core::graph_construction::neighbor_graph_matrix;
+use evoc_core::knn_graph::knn_graph as knn_graph_impl;
+use evoc_core::label_propagation::label_propagation_init_recursive;
+use evoc_core::node_embedding::node_embedding_repr_self_driven;
+use evoc_core::rng::{seed as rng_seed, tau_rand_int, RngState};
 
 fn load_scale_data(n: usize, d: usize) -> Vec<f32> {
     let path = format!("../../scripts/scale_data/scale_n{n}_d{d}.f32");

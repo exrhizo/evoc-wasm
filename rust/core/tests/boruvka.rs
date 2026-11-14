@@ -1,11 +1,11 @@
-//! Fixture parity tests for `uvoc_core::boruvka`.
+//! Fixture parity tests for `evoc_core::boruvka`.
 
 mod common;
 
 use common::{load, Tolerance};
-use uvoc_core::boruvka::{initialize_boruvka_from_knn, parallel_boruvka};
-use uvoc_core::disjoint_set::ds_rank_create;
-use uvoc_core::kdtree::build_kdtree;
+use evoc_core::boruvka::{initialize_boruvka_from_knn, parallel_boruvka};
+use evoc_core::disjoint_set::ds_rank_create;
+use evoc_core::kdtree::build_kdtree;
 
 fn json_f32_vec(v: &serde_json::Value) -> Vec<f32> {
     v.as_array().unwrap().iter().map(common::as_f32).collect()

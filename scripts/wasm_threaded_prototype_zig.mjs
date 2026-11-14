@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
-const WASM_PATH = path.join(ROOT, "zig", "zig-out", "bin", "uvoc_rp_tree_proto.wasm");
+const WASM_PATH = path.join(ROOT, "zig", "zig-out", "bin", "evoc_rp_tree_proto.wasm");
 const WORKER_PATH = path.join(__dirname, "wasm_threaded_prototype_zig_worker.mjs");
 
 const LEAF_SIZE = 30n;

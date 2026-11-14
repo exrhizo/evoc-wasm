@@ -11,7 +11,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     // Parity tests load golden fixtures relative to the repo, not the zig cache cwd.
-    run_lib_unit_tests.setEnvironmentVariable("UVOC_FIXTURES", b.pathFromRoot("../fixtures"));
+    run_lib_unit_tests.setEnvironmentVariable("EVOC_FIXTURES", b.pathFromRoot("../fixtures"));
 
     const test_step = b.step("test", "Run unit + fixture parity tests");
     test_step.dependOn(&run_lib_unit_tests.step);
@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
     const wasm_optimize = b.option(std.builtin.OptimizeMode, "wasm-optimize", "Optimize mode for `zig build wasm`") orelse .ReleaseSmall;
 
     const wasm_lib = b.addExecutable(.{
-        .name = "uvoc_core",
+        .name = "evoc_core",
         .root_source_file = b.path("src/wasm_api.zig"),
         .target = wasm_target,
         .optimize = wasm_optimize,
@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
     wasm_lib.rdynamic = true;
 
     const wasm_install = b.addInstallArtifact(wasm_lib, .{});
-    const wasm_step = b.step("wasm", "Build wasm32-freestanding uvoc_core.wasm");
+    const wasm_step = b.step("wasm", "Build wasm32-freestanding evoc_core.wasm");
     wasm_step.dependOn(&wasm_install.step);
 
     // ---------------------------------------------------------------------
@@ -55,10 +55,10 @@ pub fn build(b: *std.Build) void {
     // RP-tree prototype (see wasm_api_rp_tree_proto.zig and
     // comparison/results.md's "Threaded RP-tree prototype" section). Built
     // by a dedicated `zig build wasm-rp-tree-proto` step only -- does not
-    // touch the `wasm` step or `uvoc_core.wasm` above in any way.
+    // touch the `wasm` step or `evoc_core.wasm` above in any way.
     // ---------------------------------------------------------------------
     const rp_tree_proto_lib = b.addExecutable(.{
-        .name = "uvoc_rp_tree_proto",
+        .name = "evoc_rp_tree_proto",
         .root_source_file = b.path("src/wasm_api_rp_tree_proto.zig"),
         .target = wasm_target,
         .optimize = wasm_optimize,
@@ -67,6 +67,6 @@ pub fn build(b: *std.Build) void {
     rp_tree_proto_lib.rdynamic = true;
 
     const rp_tree_proto_install = b.addInstallArtifact(rp_tree_proto_lib, .{});
-    const rp_tree_proto_step = b.step("wasm-rp-tree-proto", "PROTOTYPE: build uvoc_rp_tree_proto.wasm (threaded RP-tree prototype, single-tree-build entry point)");
+    const rp_tree_proto_step = b.step("wasm-rp-tree-proto", "PROTOTYPE: build evoc_rp_tree_proto.wasm (threaded RP-tree prototype, single-tree-build entry point)");
     rp_tree_proto_step.dependOn(&rp_tree_proto_install.step);
 }

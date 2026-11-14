@@ -1,9 +1,9 @@
-//! Fixture parity test for `uvoc_core::clustering::build_cluster_layers`.
+//! Fixture parity test for `evoc_core::clustering::build_cluster_layers`.
 
 mod common;
 
 use common::{load, Tolerance};
-use uvoc_core::clustering::{build_cluster_layers, BuildClusterLayersOptions};
+use evoc_core::clustering::{build_cluster_layers, BuildClusterLayersOptions};
 
 fn json_i64_vec(v: &serde_json::Value) -> Vec<i64> {
     v.as_array()

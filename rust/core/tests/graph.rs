@@ -1,14 +1,14 @@
-//! Fixture parity tests for `uvoc_core::graph_construction` and
-//! `uvoc_core::knn_graph`.
+//! Fixture parity tests for `evoc_core::graph_construction` and
+//! `evoc_core::knn_graph`.
 
 mod common;
 
 use common::{load, Tolerance};
-use uvoc_core::graph_construction::{
+use evoc_core::graph_construction::{
     compute_membership_strengths, neighbor_graph_matrix, smooth_knn_dist,
 };
-use uvoc_core::knn_graph::knn_graph;
-use uvoc_core::rng::RngState;
+use evoc_core::knn_graph::knn_graph;
+use evoc_core::rng::RngState;
 
 fn json_i32_vec(v: &serde_json::Value) -> Vec<i32> {
     v.as_array()

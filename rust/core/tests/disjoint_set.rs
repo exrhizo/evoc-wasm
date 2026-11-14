@@ -1,9 +1,9 @@
-//! Fixture parity tests for `uvoc_core::disjoint_set`.
+//! Fixture parity tests for `evoc_core::disjoint_set`.
 
 mod common;
 
 use common::load;
-use uvoc_core::disjoint_set::{
+use evoc_core::disjoint_set::{
     ds_find_rank, ds_find_size, ds_rank_create, ds_size_create, ds_union_by_rank, ds_union_by_size,
 };
 

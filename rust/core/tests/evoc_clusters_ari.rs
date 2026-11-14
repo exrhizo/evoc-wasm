@@ -25,7 +25,7 @@
 mod common;
 
 use common::{as_f32, load};
-use uvoc_core::clustering::{EVoC, EvocClustersOptions};
+use evoc_core::clustering::{EVoC, EvocClustersOptions};
 
 fn json_f32_mat(v: &serde_json::Value) -> Vec<f32> {
     v.as_array()

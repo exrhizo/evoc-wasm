@@ -13,7 +13,7 @@ available in this environment (see "Toolchain ergonomics notes" below), so
 only raw release-build sizes and their gzip are recorded; the `wasm-opt -O3`
 column is left blank rather than guessed.
 
-| Build | Rust `uvoc_core.wasm` | Zig `uvoc_core.wasm` |
+| Build | Rust `evoc_core.wasm` | Zig `evoc_core.wasm` |
 |-------|------------------------|------------------------|
 | Raw release build                | 243,119 bytes | 174,824 bytes |
 | `wasm-opt -O3`                   | not measured (tool unavailable, see notes) | not measured (tool unavailable, see notes) |
@@ -51,9 +51,9 @@ Measured 2026-07-25 on this machine, Node v20.19.4, single-threaded, no
 `wasm-opt` applied (see Binary size section). Wasm: `scripts/wasm_benchmark.mjs`
 (2 warmup + 10 timed iterations per cell, `performance.now()`, median/min/max
 reported). Native: throwaway timing harnesses, `rust/core/tests/native_bench.rs`
-(`cargo test --release -p uvoc-core --test native_bench -- --ignored --nocapture`)
+(`cargo test --release -p evoc-core --test native_bench -- --ignored --nocapture`)
 and `zig/src/native_bench.zig` (`zig run -O ReleaseFast src/native_bench.zig`
-from `zig/`, `UVOC_FIXTURES` pointed at `fixtures/`). Both throwaway files are
+from `zig/`, `EVOC_FIXTURES` pointed at `fixtures/`). Both throwaway files are
 kept in the tree (not deleted) since they're generically useful for re-running
 this comparison later; they are not wired into `build.zig`/`Cargo.toml` test
 targets that run by default (Rust: `#[ignore]`; Zig: freestanding `main()`,
@@ -137,7 +137,7 @@ reverted before testing the next, so effects wouldn't compound):
    rustc for the wasm build (so the workspace `[profile.release]` is
    correctly applied per-target as expected). No explicit `-C lto=...` flag
    appears in the rustc invocation for *either* the wasm or the native
-   build of `uvoc-core` -- but this is consistent with `uvoc-core` having
+   build of `evoc-core` -- but this is consistent with `evoc-core` having
    zero dependencies (LTO's main benefit, cross-crate inlining, is a no-op
    for a single-crate compilation unit already at `codegen-units = 1`), and
    it's identical between native and wasm, so it cannot explain the
@@ -334,8 +334,8 @@ component access, but does not indicate a correctness problem in what Zig
 ## Wasm fixture parity (VALIDATION_PLAN.md section 3, item 2)
 
 `scripts/wasm_fixture_runner.mjs` loads both compiled `.wasm` binaries
-(`rust/target/wasm32-unknown-unknown/release/uvoc_core.wasm`,
-`zig/zig-out/bin/uvoc_core.wasm`) with Node's `WebAssembly` API and runs the
+(`rust/target/wasm32-unknown-unknown/release/evoc_core.wasm`,
+`zig/zig-out/bin/evoc_core.wasm`) with Node's `WebAssembly` API and runs the
 phase 1-8 JSON fixtures through the actual wasm-exported functions (not
 native code), asserting bit-exact / documented-tolerance agreement per
 PORTING.md's tolerance classes -- the same checks the native `cargo
@@ -439,7 +439,7 @@ Free-form observations comparing the two ports, collected as we go:
   it, since this sandbox's failure mode (network-restricted postinstall)
   may not reflect a typical dev machine.
 - **Build-step friction was otherwise low for both.** Rust:
-  `cargo build --target wasm32-unknown-unknown --release -p uvoc-core`,
+  `cargo build --target wasm32-unknown-unknown --release -p evoc-core`,
   zero extra flags. Zig: `zig build wasm`, similarly turnkey, though it
   requires pinning to zig 0.13.0 specifically (noted in the task
   environment info) -- newer zig releases have had breaking freestanding-
@@ -825,7 +825,7 @@ starting size, was the cost): added `rust/.cargo/config.toml` scoped to
 `[target.wasm32-unknown-unknown]` with
 `rustflags = ["-C", "link-args=--initial-memory=67108864"]` (64 MiB, a
 multiple of the 65,536-byte wasm page size), rebuilt
-(`cargo build --target wasm32-unknown-unknown --release -p uvoc-core`),
+(`cargo build --target wasm32-unknown-unknown --release -p evoc-core`),
 confirmed via the same leb128 parser that the initial page count changed
 to 1024 pages (64 MiB) as expected, and re-ran the cold/warm benchmark.
 **Zero measurable effect**: n=100 cold median 140.5 ms (vs 144.5 ms
@@ -926,7 +926,7 @@ than the real end-to-end total (2.08-2.78s), which is a giveaway that those
 numbers don't sum to, or represent shares of, the real pipeline. This pass
 adds a genuine **per-stage breakdown of the real `evoc_clusters` pipeline**,
 via a new throwaway `rust/core/tests/stage_bench.rs` (`cargo test --release
--p uvoc-core --test stage_bench -- --ignored --nocapture`) that duplicates
+-p evoc-core --test stage_bench -- --ignored --nocapture`) that duplicates
 `evoc_clusters`'s body (`rust/core/src/clustering.rs`) with `Instant`
 wrapped around each real stage call, native (no wasm), reading
 `scripts/scale_data/scale_n{n}_d32.f32` (same generator/params as the
@@ -1112,7 +1112,7 @@ whole port is validated against.
 ### Setup
 
 Reused the venv path recorded in prior investigations,
-`/wrk/claw-scratch/uvoc-wasm/pyenv` + `/wrk/claw-scratch/uvoc-wasm/evoc-
+`/wrk/claw-scratch/evoc-wasm/pyenv` + `/wrk/claw-scratch/evoc-wasm/evoc-
 reference` (a checkout of `TutteInstitute/evoc`, the same reference
 PORTING.md points at) -- both existed but the venv's `python` symlinks were
 broken (pointed at a `uv`-managed interpreter path from a different
@@ -1345,8 +1345,8 @@ which Python's numba reference parallelizes.
 ### Step 1: what Python actually parallelizes
 
 Grepped `@numba.njit(parallel=True)`/`numba.prange` across the whole
-`evoc-reference/evoc` package (`/wrk/claw-scratch/uvoc-wasm/evoc-reference`,
-`/wrk/claw-scratch/uvoc-wasm/pyenv`, same checkout used by this file's
+`evoc-reference/evoc` package (`/wrk/claw-scratch/evoc-wasm/evoc-reference`,
+`/wrk/claw-scratch/evoc-wasm/pyenv`, same checkout used by this file's
 "Python reference: time and memory" section). Result: **far more of the
 reference is `parallel=True` than this task's working hypothesis assumed**
 -- `cluster_trees.py`, `boruvka.py`, `common_nndescent.py`, `node_embedding.py`,
@@ -1392,7 +1392,7 @@ the default; nightly was not previously installed):
 - `rustup install nightly` + `rustup component add rust-src --toolchain
   nightly` succeeded cleanly (network access was available).
 - `RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals"
-  cargo +nightly build -p uvoc-core --target wasm32-unknown-unknown
+  cargo +nightly build -p evoc-core --target wasm32-unknown-unknown
   --release -Z build-std=panic_abort,std --target-dir target-threaded-proto`
   compiles cleanly (rustc 1.99.0-nightly 2026-07-24; one warning that
   `atomics` is an unstable target-feature, no errors). One nightly-only
@@ -1407,7 +1407,7 @@ the default; nightly was not previously installed):
   was found or expected (`build-std` itself remains nightly-gated).**
 - **Built into a separate `--target-dir` (`rust/target-threaded-proto/`,
   gitignored) specifically so it never touches `rust/target/wasm32-unknown-
-  unknown/release/uvoc_core.wasm`**, the path `wasm_fixture_runner.mjs` and
+  unknown/release/evoc_core.wasm`**, the path `wasm_fixture_runner.mjs` and
   `check_all.sh` read. (A first attempt built directly into the default
   `target/` dir and silently overwrote the existing single-threaded release
   wasm with the atomics-enabled one -- caught immediately by re-running
@@ -1423,7 +1423,7 @@ wasm instances/workers reading/writing that one shared memory, coordinated
 via `Atomics`. This prototype does **not** do that, and instead has each
 worker instantiate its own wasm module against its own private
 (non-shared) memory, for a concrete reason found while reading the code
-before implementing: `uvoc-core`'s wasm build uses Rust's default `dlmalloc`-
+before implementing: `evoc-core`'s wasm build uses Rust's default `dlmalloc`-
 based global allocator, which is **not thread-safe**. If N wasm instances
 truly shared one `WebAssembly.Memory`, every `Vec`/heap allocation inside
 `wasm_proto_build_one_tree` (there are several, e.g. `point_indices`,
@@ -1552,7 +1552,7 @@ specified).
 ### Verification of the existing single-threaded path (unaffected)
 
 After rebuilding the default `rust/target/wasm32-unknown-unknown/release/
-uvoc_core.wasm` with the ordinary stable toolchain (undoing the accidental
+evoc_core.wasm` with the ordinary stable toolchain (undoing the accidental
 nightly/atomics overwrite noted above): `cargo test --workspace` (all pass),
 `node scripts/wasm_fixture_runner.mjs` (rust 10/10 pass, zig 9/10 pass 1
 skip -- unchanged), `bash scripts/check_all.sh` (passes end to end,
@@ -1665,10 +1665,10 @@ tree-index order, to reassemble the final forest.
   once per tree in a sequential loop. No tree-building logic was
   duplicated or reimplemented.
 - `zig/build.zig`: one new additive step, `wasm-rp-tree-proto`, building a
-  **separate** `.wasm` artifact (`uvoc_rp_tree_proto.wasm`) from the file
-  above. It does not touch the existing `wasm` step, `uvoc_core.wasm`, or
+  **separate** `.wasm` artifact (`evoc_rp_tree_proto.wasm`) from the file
+  above. It does not touch the existing `wasm` step, `evoc_core.wasm`, or
   any existing target/optimize option in any way -- verified by re-running
-  `zig build wasm` after adding it and confirming `uvoc_core.wasm`'s
+  `zig build wasm` after adding it and confirming `evoc_core.wasm`'s
   fixture parity is unaffected (see "Verification" below).
 - `scripts/wasm_threaded_prototype_zig.mjs` + `scripts/wasm_threaded_
   prototype_zig_worker.mjs` (new). Generates deterministic synthetic data +
@@ -1777,7 +1777,7 @@ move the full-pipeline needle, exactly as the Rust section also concludes.
 ### Verification of the existing single-threaded path (unaffected)
 
 `zig build test` (all pass, unchanged), `zig build wasm` (rebuilds
-`uvoc_core.wasm` unaffected by the new `wasm-rp-tree-proto` step existing
+`evoc_core.wasm` unaffected by the new `wasm-rp-tree-proto` step existing
 alongside it), `node scripts/wasm_fixture_runner.mjs` (rust 10/10 pass,
 zig 9/10 pass 1 skip -- unchanged from before this pass), `bash scripts/
 check_all.sh` (passes end to end, zig 0.13.0, `zig fmt --check` included).

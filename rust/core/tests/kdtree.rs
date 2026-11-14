@@ -1,9 +1,9 @@
-//! Fixture parity tests for `uvoc_core::kdtree`.
+//! Fixture parity tests for `evoc_core::kdtree`.
 
 mod common;
 
 use common::{load, Tolerance};
-use uvoc_core::kdtree::{
+use evoc_core::kdtree::{
     build_kdtree, deheap_sort, parallel_tree_query, point_to_node_lower_bound_rdist, rdist,
     simple_heap_push, NumbaKDTree,
 };

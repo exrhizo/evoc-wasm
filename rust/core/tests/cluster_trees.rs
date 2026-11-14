@@ -1,9 +1,9 @@
-//! Fixture parity tests for `uvoc_core::cluster_trees`.
+//! Fixture parity tests for `evoc_core::cluster_trees`.
 
 mod common;
 
 use common::{load, Tolerance};
-use uvoc_core::cluster_trees::{
+use evoc_core::cluster_trees::{
     cluster_tree_from_condensed_tree, condense_tree, extract_eom_clusters, extract_leaves,
     get_cluster_label_vector, get_point_membership_strength_vector, mst_to_linkage_tree,
     CondensedTree, LinkageTree,

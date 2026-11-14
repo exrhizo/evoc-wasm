@@ -1,9 +1,9 @@
-//! Fixture parity tests for `uvoc_core::rng`.
+//! Fixture parity tests for `evoc_core::rng`.
 
 mod common;
 
 use common::{load, Tolerance};
-use uvoc_core::rng::{seed, tau_rand, tau_rand_int, RngState};
+use evoc_core::rng::{seed, tau_rand, tau_rand_int, RngState};
 
 fn run_case(case: &str) {
     let fixture = load("rng", case);

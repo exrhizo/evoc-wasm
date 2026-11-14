@@ -1,4 +1,4 @@
-//! Flat `extern "C"` wasm32 API surface over `uvoc-core`.
+//! Flat `extern "C"` wasm32 API surface over `evoc-core`.
 //!
 //! Only compiled for `target_arch = "wasm32"` (see the `#[cfg]` on the
 //! module declaration in `lib.rs`) so native `cargo test --workspace` is

@@ -1,7 +1,7 @@
 //! Shared fixture-loading helpers for the parity test suite.
 //!
 //! Fixtures live under `fixtures/<component>/*.json` (see PORTING.md for the
-//! schema). Location is resolved via `UVOC_FIXTURES`, falling back to the
+//! schema). Location is resolved via `EVOC_FIXTURES`, falling back to the
 //! repo-relative path from this crate.
 //!
 //! Each `tests/*.rs` file is compiled as its own crate with its own copy of
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 /// Root directory containing `disjoint_set/`, `rng/`, `distance/`, etc.
 pub fn fixtures_dir() -> PathBuf {
-    let base = std::env::var("UVOC_FIXTURES")
+    let base = std::env::var("EVOC_FIXTURES")
         .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures").to_string());
     PathBuf::from(base)
 }

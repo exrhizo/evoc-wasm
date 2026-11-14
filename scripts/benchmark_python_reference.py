@@ -40,7 +40,7 @@ over its whole lifetime (import + JIT compile + all runs) -- simplest
 reliable option available in every Python without extra dependencies.
 
 Usage:
-    /wrk/claw-scratch/uvoc-wasm/pyenv/bin/python \\
+    /wrk/claw-scratch/evoc-wasm/pyenv/bin/python \\
         scripts/benchmark_python_reference.py [n1,n2,...]
 
 Default sizes: 100,240,800,2000,10000,30000. Requires `evoc` installed in

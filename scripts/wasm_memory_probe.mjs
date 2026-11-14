@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ROOT, loadFixture } from "./wasm_fixture_lib.mjs";
 
-const ZIG_WASM = path.join(ROOT, "zig", "zig-out", "bin", "uvoc_core.wasm");
+const ZIG_WASM = path.join(ROOT, "zig", "zig-out", "bin", "evoc_core.wasm");
 
 function flattenFixture(fx) {
   return { data: fx.data.flat(), nSamples: fx.n_samples, nFeatures: fx.n_features };

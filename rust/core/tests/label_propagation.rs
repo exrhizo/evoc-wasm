@@ -1,12 +1,12 @@
-//! Fixture parity tests for `uvoc_core::label_propagation`.
+//! Fixture parity tests for `evoc_core::label_propagation`.
 
 mod common;
 
 use common::{as_f32, load};
-use uvoc_core::label_propagation::{
+use evoc_core::label_propagation::{
     label_outliers, label_prop_iteration, label_prop_loop, label_propagation_init, remap_labels,
 };
-use uvoc_core::rng::RngState;
+use evoc_core::rng::RngState;
 
 fn json_i64_vec(v: &serde_json::Value) -> Vec<i64> {
     v.as_array()

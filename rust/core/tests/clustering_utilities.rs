@@ -1,11 +1,11 @@
-//! Fixture parity tests for `uvoc_core::clustering_utilities`.
+//! Fixture parity tests for `evoc_core::clustering_utilities`.
 
 mod common;
 
 use common::{load, Tolerance};
-use uvoc_core::cluster_trees::CondensedTree;
-use uvoc_core::cluster_trees::LinkageTree;
-use uvoc_core::clustering_utilities::{
+use evoc_core::cluster_trees::CondensedTree;
+use evoc_core::cluster_trees::LinkageTree;
+use evoc_core::clustering_utilities::{
     _binary_search_for_n_clusters, build_cluster_tree, compute_total_persistence,
     estimate_cluster_similarity, extract_clusters_by_id, find_duplicates, find_peaks,
     jaccard_similarity, min_cluster_size_barcode, select_diverse_peaks,

@@ -19,13 +19,13 @@ echo "==> zig build test"
 (cd zig && zig build test)
 
 echo "==> wasm fixture parity (rust + zig .wasm binaries, if built)"
-RUST_WASM="rust/target/wasm32-unknown-unknown/release/uvoc_core.wasm"
-ZIG_WASM="zig/zig-out/bin/uvoc_core.wasm"
+RUST_WASM="rust/target/wasm32-unknown-unknown/release/evoc_core.wasm"
+ZIG_WASM="zig/zig-out/bin/evoc_core.wasm"
 if [[ -f "$RUST_WASM" || -f "$ZIG_WASM" ]]; then
   node scripts/wasm_fixture_runner.mjs
 else
   echo "skipping: neither wasm binary is built."
-  echo "  rust: cd rust && cargo build --target wasm32-unknown-unknown --release -p uvoc-core"
+  echo "  rust: cd rust && cargo build --target wasm32-unknown-unknown --release -p evoc-core"
   echo "  zig:  cd zig && zig build wasm"
 fi
 

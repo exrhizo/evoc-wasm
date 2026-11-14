@@ -399,12 +399,12 @@ PYTHONPATH=/path/to/evoc-reference /path/to/venv/bin/python \
     scripts/gen_evoc_clusters_panel_fixtures.py
 ```
 
-(this run used a freshly-built venv at `/wrk/tmp/uvoc-pyenv` with
+(this run used a freshly-built venv at `/wrk/tmp/evoc-pyenv` with
 numpy/scipy/scikit-learn/numba/tqdm installed via `uv`, since the
-previously-documented `/scratch/pyenv` and `/wrk/claw-scratch/uvoc-wasm/pyenv`
+previously-documented `/scratch/pyenv` and `/wrk/claw-scratch/evoc-wasm/pyenv`
 copies were both stale/broken -- the latter's `python` symlink pointed at a
 `uv`-managed interpreter owned by a different user account that no longer
-exists on this machine; `/wrk/claw-scratch/uvoc-wasm/evoc-reference` (the
+exists on this machine; `/wrk/claw-scratch/evoc-wasm/evoc-reference` (the
 `evoc` source checkout) was still valid and reused as-is).
 
 **Gates**, per dataset, mirroring the original panel's derivation but using

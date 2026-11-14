@@ -1,7 +1,7 @@
-# `uvoc-core` wasm32 API
+# `evoc-core` wasm32 API
 
 `rust/core/src/wasm_api.rs` exposes a flat `extern "C"` API over the
-`uvoc-core` Rust crate for `wasm32-unknown-unknown`, with no wasm-bindgen
+`evoc-core` Rust crate for `wasm32-unknown-unknown`, with no wasm-bindgen
 and no dependencies (the crate stays dependency-free for lean wasm builds,
 per `rust/core/Cargo.toml`). The module is gated with
 `#[cfg(target_arch = "wasm32")]` in `rust/core/src/lib.rs`, so it does not
@@ -12,8 +12,8 @@ exist in native builds and cannot affect `cargo test --workspace`.
 ```sh
 rustup target add wasm32-unknown-unknown   # one-time
 cd rust
-cargo build --target wasm32-unknown-unknown --release -p uvoc-core
-# -> rust/target/wasm32-unknown-unknown/release/uvoc_core.wasm
+cargo build --target wasm32-unknown-unknown --release -p evoc-core
+# -> rust/target/wasm32-unknown-unknown/release/evoc_core.wasm
 ```
 
 `Cargo.toml`'s `[lib]` section sets `crate-type = ["cdylib", "rlib"]`: the

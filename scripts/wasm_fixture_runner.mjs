@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Runs the phase 1-8 JSON fixtures under fixtures/ through the compiled
 // wasm32 binaries of BOTH ports (Rust: rust/target/wasm32-unknown-unknown/
-// release/uvoc_core.wasm, Zig: zig/zig-out/bin/uvoc_core.wasm) and asserts
+// release/evoc_core.wasm, Zig: zig/zig-out/bin/evoc_core.wasm) and asserts
 // bit-exact / documented-tolerance agreement with each fixture's expected
 // output, per PORTING.md's tolerance classes. This is the "does bit-parity
 // survive the actual shipping target" check described in
@@ -37,9 +37,9 @@ const RUST_WASM = path.join(
   "target",
   "wasm32-unknown-unknown",
   "release",
-  "uvoc_core.wasm",
+  "evoc_core.wasm",
 );
-const ZIG_WASM = path.join(ROOT, "zig", "zig-out", "bin", "uvoc_core.wasm");
+const ZIG_WASM = path.join(ROOT, "zig", "zig-out", "bin", "evoc_core.wasm");
 
 function fileExists(p) {
   try {
@@ -105,7 +105,7 @@ async function runRust(reporter) {
   if (!fileExists(RUST_WASM)) {
     reporter.skip(
       "rust wasm suite",
-      `binary not found at ${path.relative(ROOT, RUST_WASM)} -- run: cd rust && cargo build --target wasm32-unknown-unknown --release -p uvoc-core`,
+      `binary not found at ${path.relative(ROOT, RUST_WASM)} -- run: cd rust && cargo build --target wasm32-unknown-unknown --release -p evoc-core`,
     );
     return;
   }

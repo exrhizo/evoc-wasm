@@ -7,14 +7,14 @@
 //! `zig/src/dump_evoc_clusters_labels_for_cross_lang.zig`, and
 //! `scripts/compare_rust_zig_evoc_clusters.py` diffs the two dumps and
 //! computes ARI. Output path defaults to
-//! `/tmp/uvoc_cross_lang/rust_labels.json` but can be overridden with
-//! `UVOC_CROSS_LANG_OUT`.
+//! `/tmp/evoc_cross_lang/rust_labels.json` but can be overridden with
+//! `EVOC_CROSS_LANG_OUT`.
 
 mod common;
 
 use common::as_f32;
 use std::io::Write;
-use uvoc_core::clustering::{EVoC, EvocClustersOptions};
+use evoc_core::clustering::{EVoC, EvocClustersOptions};
 
 fn json_f32_mat(v: &serde_json::Value) -> Vec<f32> {
     v.as_array()
@@ -81,8 +81,8 @@ fn dump_rust_evoc_clusters_labels_for_seed_panel() {
     ));
     out.push_str("}\n");
 
-    let out_dir = std::env::var("UVOC_CROSS_LANG_OUT_DIR")
-        .unwrap_or_else(|_| "/tmp/uvoc_cross_lang".to_string());
+    let out_dir = std::env::var("EVOC_CROSS_LANG_OUT_DIR")
+        .unwrap_or_else(|_| "/tmp/evoc_cross_lang".to_string());
     std::fs::create_dir_all(&out_dir).unwrap();
     let out_path = format!("{out_dir}/rust_labels.json");
     let mut f = std::fs::File::create(&out_path).unwrap();

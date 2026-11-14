@@ -1,5 +1,5 @@
 // Minimal smoke test for the Zig wasm32-freestanding build
-// (zig/zig-out/bin/uvoc_core.wasm, built via `zig build wasm` from zig/).
+// (zig/zig-out/bin/evoc_core.wasm, built via `zig build wasm` from zig/).
 // See zig/WASM_API.md for the full exported function list/contracts.
 //
 // Run: node scripts/wasm_smoke_test_zig.mjs
@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const wasmPath = path.resolve(__dirname, "../zig/zig-out/bin/uvoc_core.wasm");
+const wasmPath = path.resolve(__dirname, "../zig/zig-out/bin/evoc_core.wasm");
 
 function assertClose(actual, expected, tol, msg) {
   if (Math.abs(actual - expected) > tol) {

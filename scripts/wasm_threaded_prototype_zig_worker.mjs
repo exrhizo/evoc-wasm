@@ -1,7 +1,7 @@
 // Worker side of scripts/wasm_threaded_prototype_zig.mjs (PROTOTYPE).
 //
 // Long-lived worker: instantiates its OWN private (non-shared) instance of
-// uvoc_rp_tree_proto.wasm ONCE, then handles repeated postMessage requests,
+// evoc_rp_tree_proto.wasm ONCE, then handles repeated postMessage requests,
 // each building whichever tree indices it was assigned and returning each
 // tree's packed leaf-array bytes to the main thread as a transferable
 // ArrayBuffer (zero-copy).

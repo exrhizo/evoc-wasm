@@ -1,6 +1,6 @@
 //! NOT a validation test -- a one-shot harness run manually via
 //! `zig test src/dump_evoc_clusters_labels_for_cross_lang.zig` (from the
-//! `zig/` directory, with `UVOC_FIXTURES` and `UVOC_CROSS_LANG_OUT_DIR` set)
+//! `zig/` directory, with `EVOC_FIXTURES` and `EVOC_CROSS_LANG_OUT_DIR` set)
 //! to dump Zig's `EVoC.fit_predict` labels for seeds 0..19 on the
 //! `evoc_clusters_e2e_ari_check` fixture, as JSON, for the cross-language
 //! (Rust vs Zig) agreement check described in
@@ -104,8 +104,8 @@ test "dump zig evoc_clusters labels for seed panel" {
 
     try out.appendSlice("}\n");
 
-    const out_dir = std.process.getEnvVarOwned(alloc, "UVOC_CROSS_LANG_OUT_DIR") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => try alloc.dupe(u8, "/tmp/uvoc_cross_lang"),
+    const out_dir = std.process.getEnvVarOwned(alloc, "EVOC_CROSS_LANG_OUT_DIR") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => try alloc.dupe(u8, "/tmp/evoc_cross_lang"),
         else => return err,
     };
     defer alloc.free(out_dir);

@@ -1,9 +1,9 @@
-//! Fixture parity tests for `uvoc_core::distance`.
+//! Fixture parity tests for `evoc_core::distance`.
 
 mod common;
 
 use common::{load, Tolerance};
-use uvoc_core::distance::{
+use evoc_core::distance::{
     fast_bit_jaccard, fast_bit_jaccard_u64, fast_cosine, fast_int_inner_product_dissimilarity,
 };
 

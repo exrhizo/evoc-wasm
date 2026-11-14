@@ -17,7 +17,7 @@ zig build wasm -Dwasm-optimize=Debug  # or ReleaseFast/ReleaseSafe
 zig build wasm -Dwasm-simd=true       # opt-in SIMD128 target feature, see note below
 ```
 
-Output: `zig/zig-out/bin/uvoc_core.wasm`. Target is always
+Output: `zig/zig-out/bin/evoc_core.wasm`. Target is always
 `wasm32-freestanding` regardless of `-Dtarget`/`-Doptimize` passed for the
 native `zig build test` step — the wasm step resolves its own fixed target
 query and reads `-Dwasm-optimize` as a separate option (default

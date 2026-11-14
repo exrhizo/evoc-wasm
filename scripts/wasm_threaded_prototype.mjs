@@ -64,7 +64,7 @@ const RUST_WASM = path.join(
   "target",
   "wasm32-unknown-unknown",
   "release",
-  "uvoc_core.wasm",
+  "evoc_core.wasm",
 );
 
 // ---------------------------------------------------------------------------

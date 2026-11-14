@@ -25,8 +25,8 @@ import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { ROOT, loadFixture } from "./wasm_fixture_lib.mjs";
 
-const RUST_WASM = path.join(ROOT, "rust", "target", "wasm32-unknown-unknown", "release", "uvoc_core.wasm");
-const ZIG_WASM = path.join(ROOT, "zig", "zig-out", "bin", "uvoc_core.wasm");
+const RUST_WASM = path.join(ROOT, "rust", "target", "wasm32-unknown-unknown", "release", "evoc_core.wasm");
+const ZIG_WASM = path.join(ROOT, "zig", "zig-out", "bin", "evoc_core.wasm");
 const DATA_DIR = path.join(ROOT, "scripts", "scale_data");
 
 const COLD_SAMPLES = 8; // fresh instance per sample

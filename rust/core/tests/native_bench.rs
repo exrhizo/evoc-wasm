@@ -2,14 +2,14 @@
 //! of `EVoC::fit_predict` for comparison/results.md's "Execution time"
 //! table (VALIDATION_PLAN.md section 3, items 3-4 -- wasm vs native
 //! overhead). Ignored by default; run with:
-//!   cargo test --release -p uvoc-core --test native_bench -- --ignored --nocapture
+//!   cargo test --release -p evoc-core --test native_bench -- --ignored --nocapture
 //! Safe to delete once the numbers are recorded in comparison/results.md.
 
 mod common;
 
 use common::{as_f32, load};
 use std::time::Instant;
-use uvoc_core::clustering::{EVoC, EvocClustersOptions};
+use evoc_core::clustering::{EVoC, EvocClustersOptions};
 
 fn json_f32_mat(v: &serde_json::Value) -> Vec<f32> {
     v.as_array()

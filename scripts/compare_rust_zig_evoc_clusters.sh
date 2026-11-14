@@ -14,18 +14,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OUT_DIR="${UVOC_CROSS_LANG_OUT_DIR:-/tmp/uvoc_cross_lang}"
+OUT_DIR="${EVOC_CROSS_LANG_OUT_DIR:-/tmp/evoc_cross_lang}"
 mkdir -p "$OUT_DIR"
 
 echo "==> Rust: dumping evoc_clusters labels for seed panel"
-(cd rust/core && UVOC_CROSS_LANG_OUT_DIR="$OUT_DIR" cargo test --test dump_evoc_clusters_labels_for_cross_lang -- --ignored --nocapture)
+(cd rust/core && EVOC_CROSS_LANG_OUT_DIR="$OUT_DIR" cargo test --test dump_evoc_clusters_labels_for_cross_lang -- --ignored --nocapture)
 
 echo "==> Zig: dumping evoc_clusters labels for seed panel"
 if ! command -v zig >/dev/null 2>&1; then
     echo "zig not found on PATH -- skipping (see PORTING.md for zig install notes)" >&2
     exit 0
 fi
-(cd zig && UVOC_FIXTURES="$(pwd)/../fixtures" UVOC_CROSS_LANG_OUT_DIR="$OUT_DIR" zig test src/dump_evoc_clusters_labels_for_cross_lang.zig)
+(cd zig && EVOC_FIXTURES="$(pwd)/../fixtures" EVOC_CROSS_LANG_OUT_DIR="$OUT_DIR" zig test src/dump_evoc_clusters_labels_for_cross_lang.zig)
 
 echo "==> Comparing Rust vs Zig labels (partition equality + ARI)"
 python3 scripts/compare_rust_zig_evoc_clusters.py \

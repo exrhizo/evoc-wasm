@@ -1,4 +1,4 @@
-//! Test-only helper for loading golden fixtures from $UVOC_FIXTURES. Never
+//! Test-only helper for loading golden fixtures from $EVOC_FIXTURES. Never
 //! shipped in the freestanding core; only referenced from `test` blocks.
 //! See PORTING.md "Fixture format".
 
@@ -86,12 +86,12 @@ pub const Fixture = struct {
     }
 };
 
-/// Reads and parses fixtures/<component>/<case>.json using the UVOC_FIXTURES
+/// Reads and parses fixtures/<component>/<case>.json using the EVOC_FIXTURES
 /// env var set by build.zig (falls back to "../fixtures" relative to cwd,
 /// which matches `zig build test`'s working directory when the env var is
 /// unset for any reason).
 pub fn readFixture(allocator: std.mem.Allocator, component: []const u8, case: []const u8) !Fixture {
-    const fixtures_dir = std.process.getEnvVarOwned(allocator, "UVOC_FIXTURES") catch |err| switch (err) {
+    const fixtures_dir = std.process.getEnvVarOwned(allocator, "EVOC_FIXTURES") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => try allocator.dupe(u8, "../fixtures"),
         else => return err,
     };

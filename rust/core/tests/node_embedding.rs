@@ -1,9 +1,9 @@
-//! Fixture parity tests for `uvoc_core::node_embedding`.
+//! Fixture parity tests for `evoc_core::node_embedding`.
 
 mod common;
 
 use common::{as_f32, load, Tolerance};
-use uvoc_core::node_embedding::{
+use evoc_core::node_embedding::{
     clip, make_epochs_per_sample, node_embedding_epoch, node_embedding_epoch_repr,
     node_embedding_repr, rdist,
 };

@@ -86,7 +86,7 @@ JSON numbers are doubles; f32 values round-trip losslessly through double, so
 "exact" f32 comparison means: parse as f64, cast to f32, compare bits.
 i64 values in fixtures are within 2^53 or stored as strings (none needed yet).
 
-Tests locate the fixtures directory via the `UVOC_FIXTURES` env var, with a
+Tests locate the fixtures directory via the `EVOC_FIXTURES` env var, with a
 compile-time fallback (`CARGO_MANIFEST_DIR/../../fixtures` in Rust; the build
 sets it for `zig build test` in Zig).
 

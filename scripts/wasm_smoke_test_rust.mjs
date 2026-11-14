@@ -2,7 +2,7 @@
 // Minimal smoke test for the Rust core's wasm32 build (rust/core/src/wasm_api.rs).
 //
 // Loads the release .wasm produced by:
-//   cd rust && cargo build --target wasm32-unknown-unknown --release -p uvoc-core
+//   cd rust && cargo build --target wasm32-unknown-unknown --release -p evoc-core
 // and exercises two exported functions end to end through the alloc/dealloc
 // buffer protocol described in WASM_API.md, checking results against
 // hand-computed expected values. This proves the wasm build is actually
@@ -23,7 +23,7 @@ const wasmPath = path.join(
   "target",
   "wasm32-unknown-unknown",
   "release",
-  "uvoc_core.wasm",
+  "evoc_core.wasm",
 );
 
 let failures = 0;

@@ -1,12 +1,12 @@
-//! Fixture parity tests for `uvoc_core::nnd_heap` and
-//! `uvoc_core::nndescent_float`.
+//! Fixture parity tests for `evoc_core::nnd_heap` and
+//! `evoc_core::nndescent_float`.
 
 mod common;
 
 use common::{load, Tolerance};
-use uvoc_core::nnd_heap::{build_candidates, flagged_heap_push, NNDHeap};
-use uvoc_core::nndescent_float::{make_float_forest, nn_descent_float, nn_descent_float_sorted};
-use uvoc_core::rng::RngState;
+use evoc_core::nnd_heap::{build_candidates, flagged_heap_push, NNDHeap};
+use evoc_core::nndescent_float::{make_float_forest, nn_descent_float, nn_descent_float_sorted};
+use evoc_core::rng::RngState;
 
 fn json_i32_vec(v: &serde_json::Value) -> Vec<i32> {
     v.as_array()

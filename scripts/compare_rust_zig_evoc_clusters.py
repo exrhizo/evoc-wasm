@@ -21,18 +21,18 @@ whether the two full pipelines would produce bit-identical output. See
 
 Usage:
     # 1. Generate the Rust dump:
-    cd rust/core && UVOC_CROSS_LANG_OUT_DIR=/tmp/uvoc_cross_lang \
+    cd rust/core && EVOC_CROSS_LANG_OUT_DIR=/tmp/evoc_cross_lang \
         cargo test --test dump_evoc_clusters_labels_for_cross_lang -- --ignored
 
     # 2. Generate the Zig dump:
-    cd zig && UVOC_FIXTURES=$(pwd)/../fixtures \
-        UVOC_CROSS_LANG_OUT_DIR=/tmp/uvoc_cross_lang \
+    cd zig && EVOC_FIXTURES=$(pwd)/../fixtures \
+        EVOC_CROSS_LANG_OUT_DIR=/tmp/evoc_cross_lang \
         zig test src/dump_evoc_clusters_labels_for_cross_lang.zig
 
     # 3. Compare:
     python3 scripts/compare_rust_zig_evoc_clusters.py \
-        --rust /tmp/uvoc_cross_lang/rust_labels.json \
-        --zig /tmp/uvoc_cross_lang/zig_labels.json \
+        --rust /tmp/evoc_cross_lang/rust_labels.json \
+        --zig /tmp/evoc_cross_lang/zig_labels.json \
         --min-median-ari 0.85
 """
 from __future__ import annotations
