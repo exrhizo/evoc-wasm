@@ -616,6 +616,18 @@ pub fn label_propagation_init_recursive(
         for v in result.iter_mut() {
             *v = ((*v as f64 - mean) / range) as f32;
         }
+        // PCA clamps its width to min(samples, features). Pad missing
+        // components so the recursive embedding retains its expected stride.
+        let actual_components = n_components.min(n_points).min(n_feat).max(1);
+        if actual_components < n_components {
+            let mut padded = vec![0.0f32; n_points * n_components];
+            for row in 0..n_points {
+                padded[row * n_components..row * n_components + actual_components].copy_from_slice(
+                    &result[row * actual_components..(row + 1) * actual_components],
+                );
+            }
+            result = padded;
+        }
         return result;
     }
 

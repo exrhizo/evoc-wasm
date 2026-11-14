@@ -113,6 +113,19 @@ async function main() {
     exports.wasm_dealloc(outPtr, outBytes);
   }
 
+  // Two-dimensional data previously trapped when recursive PCA produced fewer
+  // columns than the default internal embedding width.
+  {
+    const n = 75, d = 2, values = new Float32Array(n * d);
+    for (let i = 0; i < n; i++) { values[2*i] = i/74; values[2*i+1] = 1-i/74; }
+    const data = exports.wasm_alloc(values.byteLength), labels = exports.wasm_alloc(n*4), strengths = exports.wasm_alloc(n*4);
+    new Float32Array(memory.buffer, data, values.length).set(values);
+    const status = exports.wasm_evoc_fit_predict(data,n,d,42n,0.5,5n,15,5,50,1.0,0.2,10,20,0,labels,strengths);
+    check(`low-dimensional fit returns a cluster layer (got ${status})`, status >= 1);
+    check('low-dimensional fit returns finite membership strengths', [...new Float32Array(memory.buffer,strengths,n)].every(Number.isFinite));
+    exports.wasm_dealloc(data,values.byteLength);exports.wasm_dealloc(labels,n*4);exports.wasm_dealloc(strengths,n*4);
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);
     process.exit(1);
