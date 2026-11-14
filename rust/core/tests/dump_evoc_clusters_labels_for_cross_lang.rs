@@ -13,8 +13,8 @@
 mod common;
 
 use common::as_f32;
-use std::io::Write;
 use evoc_core::clustering::{EVoC, EvocClustersOptions};
+use std::io::Write;
 
 fn json_f32_mat(v: &serde_json::Value) -> Vec<f32> {
     v.as_array()

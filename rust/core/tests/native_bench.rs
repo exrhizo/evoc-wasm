@@ -8,8 +8,8 @@
 mod common;
 
 use common::{as_f32, load};
-use std::time::Instant;
 use evoc_core::clustering::{EVoC, EvocClustersOptions};
+use std::time::Instant;
 
 fn json_f32_mat(v: &serde_json::Value) -> Vec<f32> {
     v.as_array()

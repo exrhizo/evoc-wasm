@@ -142,16 +142,15 @@ pub fn compute_membership_strengths(
         let sigma = sigmas[i];
         for j in 0..n_neighbors {
             let idx = knn_indices[i * n_neighbors + j];
-            let val: f32;
-            if idx == -1 {
+            let val = if idx == -1 {
                 continue; // We didn't get the full knn for i
             } else if idx == i as i32 {
-                val = 0.0;
+                0.0
             } else if (knn_dists[i * n_neighbors + j] - rho) <= 0.0 || sigma == 0.0 {
-                val = 1.0;
+                1.0
             } else {
-                val = (-((knn_dists[i * n_neighbors + j] - rhos[i]) / sigma)).exp();
-            }
+                (-((knn_dists[i * n_neighbors + j] - rhos[i]) / sigma)).exp()
+            };
 
             rows[i * n_neighbors + j] = i as i32;
             cols[i * n_neighbors + j] = idx;

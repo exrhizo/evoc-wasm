@@ -6,14 +6,14 @@
 //! numbers are recorded.
 //!   cargo test --release -p evoc-core --test stage_bench -- --ignored --nocapture
 
-use std::fs;
-use std::time::Instant;
 use evoc_core::clustering::{build_cluster_layers, BuildClusterLayersOptions};
 use evoc_core::graph_construction::neighbor_graph_matrix;
 use evoc_core::knn_graph::knn_graph as knn_graph_impl;
 use evoc_core::label_propagation::label_propagation_init_recursive;
 use evoc_core::node_embedding::node_embedding_repr_self_driven;
 use evoc_core::rng::{seed as rng_seed, tau_rand_int, RngState};
+use std::fs;
+use std::time::Instant;
 
 fn load_scale_data(n: usize, d: usize) -> Vec<f32> {
     let path = format!("../../scripts/scale_data/scale_n{n}_d{d}.f32");
@@ -21,7 +21,9 @@ fn load_scale_data(n: usize, d: usize) -> Vec<f32> {
         panic!("missing {path}: {e} (run: python3 scripts/gen_scale_test_data.py)")
     });
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
